@@ -1,0 +1,19 @@
+analyze_window:
+  fields:
+    start:
+      required: true
+      example: "2026-09-29 01:00:00"
+      selector:
+        datetime:
+    end:
+      required: true
+      example: "2026-09-29 07:00:00"
+      selector:
+        datetime:
+    notify:
+      default: true
+      selector:
+        boolean:
+resend_last_report:
+snapshot_now:
+dismiss_repairs:

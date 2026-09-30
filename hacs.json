@@ -1,0 +1,5 @@
+{
+  "name": "Downtime Auditor",
+  "homeassistant": "2024.11.0",
+  "render_readme": true
+}

@@ -1,0 +1,28 @@
+{
+  "domain": "downtime_auditor",
+  "name": "Downtime Auditor",
+  "after_dependencies": [
+    "automation",
+    "calendar",
+    "frontend",
+    "http",
+    "panel_custom",
+    "persistent_notification",
+    "script",
+    "trace"
+  ],
+  "codeowners": [
+    "@YOUR_GITHUB_USERNAME"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/permster/ha-downtime-auditor",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/permster/ha-downtime-auditor/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.2.0"
+}

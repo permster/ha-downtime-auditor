@@ -1,0 +1,134 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Downtime Auditor",
+        "description": "Reports automations that were missed or interrupted while Home Assistant was restarting or down.",
+        "data": {
+          "sidebar_panel": "Sidebar dashboard",
+          "repairs": "Create Repairs issues",
+          "repairs_possible": "Repairs for 'possibly missed' too",
+          "persistent_notification": "Persistent notification",
+          "notify_service": "Push notify service (optional)",
+          "push_only_on_findings": "Push only when something was found",
+          "write_json": "Write JSON reports",
+          "retention": "JSON reports to keep",
+          "heartbeat_interval": "Heartbeat interval",
+          "startup_delay": "Startup settle delay",
+          "include_scripts": "Track scripts",
+          "include_unverifiable": "List unverifiable triggers",
+          "max_window_days": "Maximum window"
+        },
+        "data_description": {
+          "sidebar_panel": "Add a Downtime Auditor dashboard to the sidebar (admins only).",
+          "repairs": "Raise an issue in Settings \u2192 Repairs for every interrupted automation and missed trigger.",
+          "repairs_possible": "Also raise Repairs issues for lower-confidence findings.",
+          "persistent_notification": "Also post the full report to the notification panel (off by default; the dashboard replaces it).",
+          "notify_service": "e.g. notify.mobile_app_pixel_8 or script.notify_send_message_to_phone (receives title + message). Leave blank to disable.",
+          "push_only_on_findings": "Skip the phone push when nothing was missed or interrupted.",
+          "write_json": "Save each report to /config/downtime_auditor/reports and append a line to history.jsonl.",
+          "retention": "Older report files are deleted; history.jsonl is kept.",
+          "heartbeat_interval": "How often state is snapshotted to disk. Sets the accuracy of the window start after a crash or power loss.",
+          "startup_delay": "Wait this long after HA has started before analysing, so integrations can restore their real states.",
+          "include_scripts": "Also report scripts that were running when HA went down.",
+          "include_unverifiable": "List event/webhook/MQTT-style triggers whose missed firings can't be reconstructed.",
+          "max_window_days": "Cap on how far back to look after a long outage."
+        }
+      }
+    },
+    "error": {
+      "invalid_service": "Use the form notify.xxx or script.xxx"
+    },
+    "abort": {
+      "already_configured": "Downtime Auditor is already set up.",
+      "single_instance_allowed": "Only one instance is allowed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Downtime Auditor options",
+        "data": {
+          "sidebar_panel": "Sidebar dashboard",
+          "repairs": "Create Repairs issues",
+          "repairs_possible": "Repairs for 'possibly missed' too",
+          "persistent_notification": "Persistent notification",
+          "notify_service": "Push notify service (optional)",
+          "push_only_on_findings": "Push only when something was found",
+          "write_json": "Write JSON reports",
+          "retention": "JSON reports to keep",
+          "heartbeat_interval": "Heartbeat interval",
+          "startup_delay": "Startup settle delay",
+          "include_scripts": "Track scripts",
+          "include_unverifiable": "List unverifiable triggers",
+          "max_window_days": "Maximum window"
+        },
+        "data_description": {
+          "sidebar_panel": "Add a Downtime Auditor dashboard to the sidebar (admins only).",
+          "repairs": "Raise an issue in Settings \u2192 Repairs for every interrupted automation and missed trigger.",
+          "repairs_possible": "Also raise Repairs issues for lower-confidence findings.",
+          "persistent_notification": "Also post the full report to the notification panel (off by default; the dashboard replaces it).",
+          "notify_service": "e.g. notify.mobile_app_pixel_8 or script.notify_send_message_to_phone (receives title + message). Leave blank to disable.",
+          "push_only_on_findings": "Skip the phone push when nothing was missed or interrupted.",
+          "write_json": "Save each report to /config/downtime_auditor/reports and append a line to history.jsonl.",
+          "retention": "Older report files are deleted; history.jsonl is kept.",
+          "heartbeat_interval": "How often state is snapshotted to disk. Sets the accuracy of the window start after a crash or power loss.",
+          "startup_delay": "Wait this long after HA has started before analysing, so integrations can restore their real states.",
+          "include_scripts": "Also report scripts that were running when HA went down.",
+          "include_unverifiable": "List event/webhook/MQTT-style triggers whose missed firings can't be reconstructed.",
+          "max_window_days": "Cap on how far back to look after a long outage."
+        }
+      }
+    },
+    "error": {
+      "invalid_service": "Use the form notify.xxx or script.xxx"
+    }
+  },
+  "services": {
+    "analyze_window": {
+      "name": "Analyze a what-if window",
+      "description": "Report which time, time-pattern, sun and calendar triggers would be missed if HA were down between start and end. Useful for testing.",
+      "fields": {
+        "start": {
+          "name": "Start",
+          "description": "Window start (local time)."
+        },
+        "end": {
+          "name": "End",
+          "description": "Window end (local time)."
+        },
+        "notify": {
+          "name": "Notify",
+          "description": "Also show the result as a persistent notification."
+        }
+      }
+    },
+    "resend_last_report": {
+      "name": "Resend last report",
+      "description": "Re-send the most recent downtime report to the persistent notification and push service."
+    },
+    "snapshot_now": {
+      "name": "Snapshot now",
+      "description": "Capture the baseline and running-automation snapshot immediately (for debugging)."
+    },
+    "dismiss_repairs": {
+      "name": "Dismiss repairs",
+      "description": "Remove all Repairs issues raised by the latest report."
+    }
+  },
+  "issues": {
+    "interrupted": {
+      "title": "Interrupted by downtime: {name}",
+      "description": "`{entity_id}` was running when Home Assistant went down and did not finish.\n\n**{summary}**\n\nDowntime: {window}\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+    },
+    "missed": {
+      "title": "Missed during downtime: {name}",
+      "description": "`{entity_id}` had a trigger that should have fired while Home Assistant was down.\n\n**{summary}**\n\nDowntime: {window}\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+    },
+    "possibly_missed": {
+      "title": "Possibly missed during downtime: {name}",
+      "description": "`{entity_id}` may have missed a trigger while Home Assistant was down.\n\n**{summary}**\n\nDowntime: {window}\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+    }
+  },
+  "entity": {}
+}
