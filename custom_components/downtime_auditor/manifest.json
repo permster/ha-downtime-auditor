@@ -12,7 +12,7 @@
     "trace"
   ],
   "codeowners": [
-    "@YOUR_GITHUB_USERNAME"
+    "@permster"
   ],
   "config_flow": true,
   "dependencies": [

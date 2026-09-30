@@ -1,0 +1,26 @@
+name: Release
+on:
+ workflow_dispatch:
+   inputs:
+     bump: { description: Version bump, type: choice, options: [patch, minor, major], default: patch }
+     prerelease: { description: Beta pre-release, type: boolean, default: false }
+permissions:
+ contents: write
+jobs:
+ release:
+   runs-on: ubuntu-latest
+   steps:
+     - uses: actions/checkout@v4
+       with: { ref: main, fetch-depth: 0 }
+     - uses: actions/setup-python@v5
+       with: { python-version: "3.13" }
+     - id: v
+       run: echo "new=$(python .github/scripts/bump_version.py ${{ inputs.bump }} ${{ inputs.prerelease }})" >> "$GITHUB_OUTPUT"
+     - run: |
+         git config user.name "github-actions[bot]"
+         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+         git commit -am "Release v${{ steps.v.outputs.new }}"
+         git tag "v${{ steps.v.outputs.new }}"
+         git push origin main "v${{ steps.v.outputs.new }}"
+     - env: { GH_TOKEN: "${{ github.token }}" }
+       run: gh release create "v${{ steps.v.outputs.new }}" --generate-notes ${{ inputs.prerelease && '--prerelease' || '' }}
