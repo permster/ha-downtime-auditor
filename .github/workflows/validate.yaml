@@ -28,4 +28,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install pytest-homeassistant-custom-component
+      - name: Install the frontend version matching the installed HA core
+        run: |
+          pip install "$(python -c 'import json, pathlib, homeassistant.components.frontend as f; print(json.loads((pathlib.Path(f.__file__).parent / "manifest.json").read_text())["requirements"][0])')"
       - run: pytest -q

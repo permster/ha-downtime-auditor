@@ -6,6 +6,8 @@ from datetime import timedelta
 import json
 from pathlib import Path
 
+import pytest
+
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_mock_service
 
 from homeassistant.setup import async_setup_component
@@ -343,11 +345,11 @@ async def test_entities_repairs_and_websocket(hass, enable_custom_integrations, 
     })
     msg = await client.receive_json()
     assert msg["success"] and any(f["entity_id"] == "automation.morning" for f in msg["result"]["findings"])
-    # dump a sample report for the panel render check
-    Path("/tmp/claude-0/da_sample_report.json").write_text(json.dumps(msg["result"]))
 
 
 async def test_sidebar_panel_registered(hass, enable_custom_integrations):
+    # The frontend component needs the (large) home-assistant-frontend package.
+    pytest.importorskip("hass_frontend")
     from homeassistant.components.frontend import DATA_PANELS
 
     await async_setup_component(hass, "http", {})
