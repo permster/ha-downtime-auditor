@@ -29,7 +29,8 @@ from .const import (
     CONF_PUSH_ONLY_ON_FINDINGS,
     CONF_REPAIRS,
     CONF_REPAIRS_POSSIBLE,
-    CONF_RETENTION,
+    CONF_HISTORY_DAYS,
+    CONF_REPORT_DAYS,
     CONF_SIDEBAR_PANEL,
     CONF_STARTUP_DELAY,
     CONF_WRITE_JSON,
@@ -42,7 +43,8 @@ from .const import (
     DEFAULT_PUSH_ONLY_ON_FINDINGS,
     DEFAULT_REPAIRS,
     DEFAULT_REPAIRS_POSSIBLE,
-    DEFAULT_RETENTION,
+    DEFAULT_HISTORY_DAYS,
+    DEFAULT_REPORT_DAYS,
     DEFAULT_SIDEBAR_PANEL,
     DEFAULT_STARTUP_DELAY,
     DEFAULT_WRITE_JSON,
@@ -70,7 +72,8 @@ DEFAULTS = {
     CONF_NOTIFY_SERVICE: DEFAULT_NOTIFY_SERVICE,
     CONF_PUSH_ONLY_ON_FINDINGS: DEFAULT_PUSH_ONLY_ON_FINDINGS,
     CONF_WRITE_JSON: DEFAULT_WRITE_JSON,
-    CONF_RETENTION: DEFAULT_RETENTION,
+    CONF_REPORT_DAYS: DEFAULT_REPORT_DAYS,
+    CONF_HISTORY_DAYS: DEFAULT_HISTORY_DAYS,
     CONF_INCLUDE_SCRIPTS: DEFAULT_INCLUDE_SCRIPTS,
     CONF_INCLUDE_UNVERIFIABLE: DEFAULT_INCLUDE_UNVERIFIABLE,
     CONF_MAX_WINDOW_DAYS: DEFAULT_MAX_WINDOW_DAYS,
@@ -365,7 +368,9 @@ class DowntimeAuditor:
     async def _async_publish(self, report: dict) -> None:
         json_path = None
         if self.opt(CONF_WRITE_JSON):
-            json_path = await async_write_json(self.hass, report, int(self.opt(CONF_RETENTION)))
+            json_path = await async_write_json(
+                self.hass, report, int(self.opt(CONF_REPORT_DAYS)), int(self.opt(CONF_HISTORY_DAYS))
+            )
         report.setdefault("meta", {})["json_path"] = json_path
         self.last_report = report
         self.data["last_report"] = report

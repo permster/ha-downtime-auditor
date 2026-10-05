@@ -116,7 +116,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     this._render();
   }
   async _loadHistory() {
-    try { this._history = await this._ws("history", { limit: 200 }); } catch (e) { this._error = e.message; }
+    try { this._history = await this._ws("history", { limit: 500 }); } catch (e) { this._error = e.message; }
     this._render();
   }
   async _loadStatus() {
@@ -364,6 +364,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     const h = this._history;
     if (!h) return `<div class="empty">Loading history…</div>`;
     if (!h.length) return `<div class="card empty-card"><h2>No history yet</h2><p>Each restart adds an entry here (requires “Write JSON reports”).</p></div>`;
+    const withReport = h.filter((i) => i.available).length;
     const items = h.slice(0, 40).slice().reverse();
     const max = Math.max(...items.map((i) => i.window?.duration_seconds || 0), 1);
     const W = this._chartWidth(), H = 160, bw = Math.min(56, (W - 40) / items.length);
@@ -384,13 +385,18 @@ class DowntimeAuditorPanel extends HTMLElement {
           <line x1="20" x2="${W - 20}" y1="${H - 20}" y2="${H - 20}" class="axis"/></svg>
         <div class="legend"><span><i style="background:var(--da-blue)"></i>Clean</span><span><i style="background:var(--da-red)"></i>Unclean</span><span><i class="dot" style="background:var(--da-orange)"></i>Had missed / interrupted</span></div>
       </div>
-      <div class="card"><table class="tbl">
+      <div class="card">
+        <p class="muted small">${h.length} downtime${h.length === 1 ? "" : "s"} recorded · ${withReport} with a saved report.
+          Full reports are kept only when something was found, for the retention period set in the integration's options.</p>
+        <table class="tbl">
         <thead><tr><th>Went down</th><th>Duration</th><th>Shutdown</th>${CATS.slice(0, 4).map((c) => `<th title="${c.label}"><ha-icon icon="${c.icon}"></ha-icon></th>`).join("")}<th></th></tr></thead>
         <tbody>${h.map((it) => `<tr>
           <td>${esc(fmtTime(it.window?.start))}</td><td>${esc(it.window?.duration)}</td>
           <td><span class="chip sm ${it.window?.clean_shutdown ? "ok" : "bad"}">${it.window?.clean_shutdown ? "clean" : "unclean"}</span></td>
           ${CATS.slice(0, 4).map((c) => `<td class="${it.counts?.[c.key] ? "hot" : "muted"}">${it.counts?.[c.key] || 0}</td>`).join("")}
-          <td>${it.available ? `<a href="#" data-file="${esc(it.file)}">Open</a>` : `<span class="muted">pruned</span>`}</td></tr>`).join("")}
+          <td>${it.available ? `<a href="#" data-file="${esc(it.file)}">Open</a>`
+            : it.file ? `<span class="muted" title="Older than the report retention period">expired</span>`
+            : `<span class="muted" title="Nothing was missed or interrupted, so only this summary was kept">nothing found</span>`}</td></tr>`).join("")}
         </tbody></table></div>`;
   }
 
@@ -603,6 +609,7 @@ svg text { fill: var(--da-muted); font-size: 11px; }
 .empty-card { text-align: center; padding: 40px 24px; }
 .empty-card .big { --mdc-icon-size: 48px; color: var(--da-muted); }
 .foot { font-size: 12px; margin-top: 10px; }
+.small { font-size: 12px; margin: 0 0 8px; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tbl th, .tbl td { text-align: left; padding: 8px; border-bottom: 1px solid var(--da-line); }
 .tbl th { color: var(--da-muted); font-weight: 500; }

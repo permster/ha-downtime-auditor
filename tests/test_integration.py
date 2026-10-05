@@ -188,7 +188,8 @@ async def test_config_flow(hass, enable_custom_integrations):
             "notify_service": "bad",
             "push_only_on_findings": True,
             "write_json": True,
-            "retention": 10,
+            "report_retention_days": 30,
+            "history_retention_days": 365,
             "heartbeat_interval": 60,
             "startup_delay": 30,
             "include_scripts": True,
@@ -327,7 +328,12 @@ async def test_entities_repairs_and_websocket(hass, enable_custom_integrations, 
     assert msg["success"] and msg["result"]["window"]
     await client.send_json({"id": 2, "type": "downtime_auditor/history"})
     msg = await client.receive_json()
-    assert msg["success"] and len(msg["result"]) == 2 and msg["result"][0]["available"]
+    # Newest first. A downtime only gets a saved report if something was found.
+    assert msg["success"] and len(msg["result"]) == 2
+    for item in msg["result"]:
+        found = any(item["counts"].get(c) for c in ("interrupted", "missed", "possibly_missed", "fired_during_startup"))
+        assert item["available"] == found == (item["file"] is not None)
+    assert msg["result"][1]["available"]
     first_file = msg["result"][1]["file"]
     await client.send_json({"id": 3, "type": "downtime_auditor/report", "file": first_file})
     msg = await client.receive_json()
@@ -366,3 +372,72 @@ async def test_sidebar_panel_registered(hass, enable_custom_integrations):
     hass.config_entries.async_update_entry(entry, options={**entry.options, "sidebar_panel": False})
     await hass.async_block_till_done()
     assert "downtime-auditor" not in hass.data[DATA_PANELS]
+
+
+def test_retention_by_age_and_empty_reports(tmp_path):
+    """Full reports only when something was found; prune reports and history by age."""
+    from homeassistant.util import dt as dt_util
+
+    from custom_components.downtime_auditor import report as rep
+
+    base = tmp_path
+    reports = base / "reports"
+    reports.mkdir()
+    now = dt_util.utcnow()
+
+    def local_stamp(dt):
+        return dt_util.as_local(dt).strftime("%Y%m%d-%H%M%S")
+
+    # Pre-existing files: one 40 days old (expired), one 5 days old (kept)
+    old = reports / f"report-{local_stamp(now - timedelta(days=40))}.json"
+    recent = reports / f"report-{local_stamp(now - timedelta(days=5))}.json"
+    old.write_text("{}")
+    recent.write_text("{}")
+    # History: one line 400 days old (dropped), one 10 days old (kept)
+    hist = base / "history.jsonl"
+    hist.write_text(
+        json.dumps({"generated_at": (now - timedelta(days=400)).isoformat(), "file": None}) + "\n"
+        + json.dumps({"generated_at": (now - timedelta(days=10)).isoformat(), "file": None}) + "\n"
+    )
+
+    def make(counts):
+        return {
+            "generated_at": now.isoformat(),
+            "window": {"start": now.isoformat(), "end": now.isoformat()},
+            "counts": counts,
+            "actionable": sum(v for k, v in counts.items() if k != "unverifiable"),
+            "findings": [],
+        }
+
+    # Clean restart with only unverifiable noise -> no report file
+    assert rep._write_files(base, make({"unverifiable": 3}), 30, 365) is None
+    # Restart with a missed trigger -> report file
+    path = rep._write_files(base, make({"missed": 1}), 30, 365)
+    assert path and Path(path).exists()
+
+    names = {p.name for p in reports.glob("report-*.json")}
+    assert old.name not in names and recent.name in names and Path(path).name in names
+    lines = [json.loads(x) for x in hist.read_text().splitlines()]
+    assert len(lines) == 3  # 10-day-old line + the two new ones; 400-day line dropped
+    assert lines[1]["file"] is None and lines[2]["file"] == Path(path).name
+    assert (base / "last_report.json").exists()
+
+
+def test_report_file_cap(tmp_path, monkeypatch):
+    """The hard cap still applies within the retention period."""
+    from homeassistant.util import dt as dt_util
+
+    from custom_components.downtime_auditor import report as rep
+
+    monkeypatch.setattr(rep, "MAX_REPORT_FILES", 3)
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    now = dt_util.utcnow()
+    for i in range(5):
+        stamp = dt_util.as_local(now - timedelta(hours=i + 1)).strftime("%Y%m%d-%H%M%S")
+        (reports / f"report-{stamp}.json").write_text("{}")
+    rep._prune_reports(reports, 30, now)
+    left = sorted(p.name for p in reports.glob("report-*.json"))
+    assert len(left) == 3
+    newest = dt_util.as_local(now - timedelta(hours=1)).strftime("%Y%m%d-%H%M%S")
+    assert f"report-{newest}.json" in left

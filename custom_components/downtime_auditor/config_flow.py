@@ -20,7 +20,8 @@ from .const import (
     CONF_PUSH_ONLY_ON_FINDINGS,
     CONF_REPAIRS,
     CONF_REPAIRS_POSSIBLE,
-    CONF_RETENTION,
+    CONF_HISTORY_DAYS,
+    CONF_REPORT_DAYS,
     CONF_SIDEBAR_PANEL,
     CONF_STARTUP_DELAY,
     CONF_WRITE_JSON,
@@ -49,7 +50,12 @@ def _schema(values: dict[str, Any]) -> vol.Schema:
             vol.Optional(CONF_NOTIFY_SERVICE, default=d(CONF_NOTIFY_SERVICE)): str,
             vol.Required(CONF_PUSH_ONLY_ON_FINDINGS, default=d(CONF_PUSH_ONLY_ON_FINDINGS)): bool,
             vol.Required(CONF_WRITE_JSON, default=d(CONF_WRITE_JSON)): bool,
-            vol.Required(CONF_RETENTION, default=d(CONF_RETENTION)): vol.All(num(1, 5000), vol.Coerce(int)),
+            vol.Required(CONF_REPORT_DAYS, default=d(CONF_REPORT_DAYS)): vol.All(
+                num(1, 365, "d"), vol.Coerce(int)
+            ),
+            vol.Required(CONF_HISTORY_DAYS, default=d(CONF_HISTORY_DAYS)): vol.All(
+                num(7, 3650, "d"), vol.Coerce(int)
+            ),
             vol.Required(CONF_HEARTBEAT_INTERVAL, default=d(CONF_HEARTBEAT_INTERVAL)): vol.All(
                 num(10, 3600, "s"), vol.Coerce(int)
             ),

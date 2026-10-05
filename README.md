@@ -17,12 +17,12 @@ Results show up in four places:
 
 1. **A sidebar dashboard** (admins only) with four tabs:
    - **Last report:** a summary, category tiles you can click to filter, a timeline of the downtime showing each missed time, and a searchable list of findings. Each finding expands to show before/after values, due times and the step a run stopped at, with links to the automation's editor and traces.
-   - **History:** every restart, with a duration chart. Click any entry to open that report.
+   - **History:** every restart, with a duration chart. Click an entry to open its full report.
    - **Live status:** heartbeat health and what's running right now, i.e. what *would* be interrupted if HA stopped this instant.
    - **What-if:** pick any time window and see which scheduled triggers a downtime then would miss.
 2. **Settings → Repairs:** one issue per interrupted or missed finding, the way Spook raises its issues. Previous issues are replaced by each new report. You can ignore them individually or clear them with a service.
 3. **Entities** (Watchman-style) on a *Downtime Auditor* device: one count sensor per category, with the findings in a `findings` attribute (excluded from the recorder), plus duration and timestamp sensors and problem binary sensors.
-4. **JSON history** under `/config/downtime_auditor/`, plus an optional phone push. A persistent notification is also available but is off by default.
+4. **JSON history** under `/config/downtime_auditor/` (see [History and retention](#history-and-retention)), plus an optional phone push. A persistent notification is also available but is off by default.
 
 ![Dashboard](docs/dashboard.png)
 
@@ -143,13 +143,26 @@ content: >
 | Persistent notification | off | Posts the markdown report to the notification panel. |
 | Push notify service | blank | `notify.mobile_app_xxx`, or a script that accepts `title` and `message` variables. |
 | Push only when something was found | on | |
-| Write JSON reports | on | Writes `reports/report-*.json`, `last_report.json` and `history.jsonl`. The History tab needs this. |
-| JSON reports to keep | 100 | `history.jsonl` is never pruned. |
+| Write JSON reports | on | Saves reports under `/config/downtime_auditor/`. The History tab needs this. |
+| Keep detailed reports for | 30 days | A full report is saved only when a downtime had something interrupted, missed, possibly missed or fired at startup. Older reports are deleted, with a hard cap of 500 files. |
+| Keep history summary for | 365 days | One line per downtime (about 0.5 KB each), including restarts where nothing was found. |
 | Heartbeat interval | 60 s | Lower gives better crash accuracy but more disk writes. |
 | Startup settle delay | 90 s | Increase if Zigbee/Z-Wave/cloud entities take a while to come back. |
 | Track scripts | on | Report scripts that were interrupted. |
 | List unverifiable triggers | on | |
 | Maximum window | 14 d | Caps the analysis after a very long outage. |
+
+## History and retention
+
+Every downtime gets its own entry, including restarts in quick succession, so you can always tell which specific restart caused a problem.
+
+| File | Contents | Kept for |
+|---|---|---|
+| `history.jsonl` | One summary line per downtime: window, clean or unclean, counts | 365 days (configurable) |
+| `reports/report-*.json` | Full report, only for downtimes where something was found | 30 days (configurable), max 500 files |
+| `last_report.json` | The most recent report, whatever it found | Always overwritten |
+
+A clean restart where nothing was missed or interrupted only adds a summary line, so a busy day of config reloads won't push older, more useful reports out. In the History tab, entries without a saved report show **nothing found**, and entries past the retention period show **expired**.
 
 ## Services
 
@@ -176,7 +189,11 @@ actions:
 
 ## Compatibility
 
-Home Assistant 2024.11 or newer; tested against 2026.2. The integration reads two semi-internal structures: automation trigger config and trace data. If a future HA release changes them, it degrades to less detail rather than failing.
+- **Requires** Home Assistant 2024.11 or newer.
+- **Tested** on Home Assistant 2026.2.
+- **Brand icon** displays on Home Assistant 2026.3 and newer; older versions show a generic placeholder.
+
+The integration reads two internal Home Assistant structures (automation trigger configuration and trace data). If a future release changes them, it falls back to showing less detail rather than failing.
 
 ## Development
 

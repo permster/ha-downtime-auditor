@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -19,6 +21,7 @@ from .const import (
     CAT_STARTUP_FIRED,
     CAT_UNVERIFIABLE,
     HISTORY_FILE,
+    MAX_REPORT_FILES,
     NAME,
     PERSISTENT_NOTIFICATION_ID,
     REPORT_DIR,
@@ -26,6 +29,7 @@ from .const import (
 from .schedule import fmt_duration
 
 _LOGGER = logging.getLogger(__name__)
+REPORT_NAME_RE = re.compile(r"^report-(\d{8}-\d{6})(?:-\d+)?\.json$")
 
 SECTION_ORDER = [
     (CAT_INTERRUPTED, "Interrupted mid-run"),
@@ -158,39 +162,100 @@ def to_push(report: dict[str, Any]) -> tuple[str, str]:
     return title, msg
 
 
-def _write_files(base: Path, report: dict[str, Any], retention: int) -> str:
+# Categories that make a downtime worth keeping a full report for.
+KEEP_FULL_CATEGORIES = (CAT_INTERRUPTED, CAT_MISSED, CAT_POSSIBLE, CAT_STARTUP_FIRED)
+
+
+def has_findings(report: dict[str, Any]) -> bool:
+    """True when the report has anything beyond unverifiable/skipped noise."""
+    counts = report.get("counts") or {}
+    return any(counts.get(c) for c in KEEP_FULL_CATEGORIES)
+
+
+def _report_time(path: Path) -> datetime:
+    """When a report file was generated (from its name, falling back to mtime)."""
+    m = REPORT_NAME_RE.match(path.name)
+    if m:
+        local = datetime.strptime(m.group(1), "%Y%m%d-%H%M%S")
+        return dt_util.as_utc(local.replace(tzinfo=dt_util.get_default_time_zone()))
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=dt_util.UTC)
+
+
+def _prune_reports(reports: Path, report_days: int, now: datetime) -> None:
+    """Delete report files older than report_days, then enforce the file cap."""
+    cutoff = now - timedelta(days=report_days)
+    files = sorted(reports.glob("report-*.json"), key=_report_time)
+    keep: list[Path] = []
+    for f in files:
+        if _report_time(f) < cutoff:
+            f.unlink(missing_ok=True)
+        else:
+            keep.append(f)
+    for f in keep[:-MAX_REPORT_FILES]:
+        f.unlink(missing_ok=True)
+
+
+def _append_history(base: Path, summary: dict[str, Any], history_days: int, now: datetime) -> None:
+    """Append a summary line and drop lines older than history_days."""
+    path = base / HISTORY_FILE
+    cutoff = now - timedelta(days=history_days)
+    kept: list[str] = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                when = dt_util.parse_datetime(json.loads(line).get("generated_at") or "")
+            except ValueError:
+                continue
+            if when is not None and when >= cutoff:
+                kept.append(line)
+    kept.append(json.dumps(summary, default=str))
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _write_files(base: Path, report: dict[str, Any], report_days: int, history_days: int) -> str | None:
+    """Write the report and history. Returns the report file path, or None if
+    the downtime had no findings (only a history line is kept for those)."""
+    now = dt_util.utcnow()
     reports = base / "reports"
     reports.mkdir(parents=True, exist_ok=True)
-    stamp = dt_util.as_local(dt_util.parse_datetime(report["generated_at"])).strftime("%Y%m%d-%H%M%S")
-    path = reports / f"report-{stamp}.json"
-    n = 1
-    while path.exists():
-        path = reports / f"report-{stamp}-{n}.json"
-        n += 1
-    path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
-    (base / "last_report.json").write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
-    summary = {
-        "generated_at": report["generated_at"],
-        "window": report["window"],
-        "counts": report["counts"],
-        "file": path.name,
-    }
-    with (base / HISTORY_FILE).open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(summary, default=str) + "\n")
-    files = sorted(reports.glob("report-*.json"))
-    for old in files[:-retention] if retention > 0 else []:
-        try:
-            old.unlink()
-        except OSError:
-            pass
-    return str(path)
+    payload = json.dumps(report, indent=2, default=str)
+    (base / "last_report.json").write_text(payload, encoding="utf-8")
+
+    path: Path | None = None
+    if has_findings(report):
+        stamp = dt_util.as_local(dt_util.parse_datetime(report["generated_at"])).strftime("%Y%m%d-%H%M%S")
+        path = reports / f"report-{stamp}.json"
+        n = 1
+        while path.exists():
+            path = reports / f"report-{stamp}-{n}.json"
+            n += 1
+        path.write_text(payload, encoding="utf-8")
+
+    _append_history(
+        base,
+        {
+            "generated_at": report["generated_at"],
+            "window": report["window"],
+            "counts": report["counts"],
+            "actionable": report.get("actionable", 0),
+            "file": path.name if path else None,
+        },
+        history_days,
+        now,
+    )
+    _prune_reports(reports, report_days, now)
+    return str(path) if path else None
 
 
-async def async_write_json(hass: HomeAssistant, report: dict[str, Any], retention: int) -> str | None:
-    """Write report + append history, in the executor."""
+async def async_write_json(
+    hass: HomeAssistant, report: dict[str, Any], report_days: int, history_days: int
+) -> str | None:
+    """Write report + history in the executor."""
     base = Path(hass.config.path(REPORT_DIR))
     try:
-        return await hass.async_add_executor_job(_write_files, base, report, retention)
+        return await hass.async_add_executor_job(_write_files, base, report, report_days, history_days)
     except Exception:  # noqa: BLE001
         _LOGGER.exception("Could not write downtime report JSON")
         return None

@@ -101,13 +101,14 @@ def _read_history(base: Path, limit: int) -> list[dict]:
             item = json.loads(line)
         except ValueError:
             continue
-        item["available"] = (base / "reports" / str(item.get("file"))).exists()
+        name = item.get("file")
+        item["available"] = bool(name) and (base / "reports" / str(name)).exists()
         out.append(item)
     return list(reversed(out))
 
 
 @websocket_api.websocket_command(
-    {vol.Required("type"): f"{DOMAIN}/history", vol.Optional("limit", default=100): vol.All(int, vol.Range(1, 1000))}
+    {vol.Required("type"): f"{DOMAIN}/history", vol.Optional("limit", default=100): vol.All(int, vol.Range(1, 5000))}
 )
 @websocket_api.async_response
 async def ws_history(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
