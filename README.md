@@ -1,4 +1,7 @@
 # Downtime Auditor for Home Assistant
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz)
+[![GitHub Release](https://img.shields.io/github/v/release/permster/ha-downtime-auditor?include_prereleases)](https://github.com/permster/ha-downtime-auditor/releases)
+[![Validate](https://github.com/permster/ha-downtime-auditor/actions/workflows/validate.yaml/badge.svg)](https://github.com/permster/ha-downtime-auditor/actions/workflows/validate.yaml)
 
 After every restart, crash or power loss, Downtime Auditor tells you:
 
@@ -64,17 +67,39 @@ Known blind spots:
 - A state that changed **and changed back** during the outage is invisible, because nothing was recorded while HA was down.
 - After an unclean stop, anything between the last heartbeat and the crash has a ±heartbeat margin of error.
 
-## Install (HACS custom repository)
+## Installation
 
-1. Push this folder to a GitHub repo, e.g. `ha-downtime-auditor`.
-2. Replace `YOUR_GITHUB_USERNAME` in `custom_components/downtime_auditor/manifest.json`.
-3. In HACS, open **⋮ → Custom repositories**, add the repo URL with type **Integration**, then install **Downtime Auditor**.
-4. Restart Home Assistant.
-5. Go to **Settings → Devices & services → Add integration → Downtime Auditor**.
+### HACS (recommended)
 
-The first boot only starts tracking. Reports begin from the **next** restart. The sidebar dashboard appears immediately.
+Downtime Auditor is available as a HACS custom repository.
 
-Manual install: copy `custom_components/downtime_auditor` into `/config/custom_components/`.
+[![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=permster&repository=ha-downtime-auditor&category=integration)
+
+Or add it manually:
+
+1. In Home Assistant, open **HACS**.
+2. Select **⋮ → Custom repositories**.
+3. Enter `https://github.com/permster/ha-downtime-auditor`, choose type **Integration**, and select **Add**.
+4. Search for **Downtime Auditor**, open it, and select **Download**.
+5. Restart Home Assistant.
+
+### Manual
+
+1. Download `Source code (zip)` from the [latest release](https://github.com/permster/ha-downtime-auditor/releases/latest).
+2. Copy the `custom_components/downtime_auditor` folder into your Home Assistant `config/custom_components/` folder.
+3. Restart Home Assistant.
+
+## Configuration
+
+[![Open your Home Assistant instance and start setting up Downtime Auditor.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=downtime_auditor)
+
+1. Go to **Settings → Devices & services → Add integration**.
+2. Search for **Downtime Auditor** and follow the prompts. The defaults work well for most setups; see [Options](#options) for what each setting does.
+3. The **Downtime Auditor** dashboard appears in the sidebar right away (admin users only).
+
+> **Note:** Downtime Auditor needs one restart to capture a baseline. Your first report appears after the **next** restart of Home Assistant. Until then, you can try the **What-if** tab on the dashboard.
+
+Every option can be changed later from **Settings → Devices & services → Downtime Auditor → Configure**.
 
 ## Entities
 
@@ -149,6 +174,10 @@ actions:
       message: "{{ trigger.event.data.counts.interrupted }} automation(s) were interrupted by the restart"
 ```
 
+## Compatibility
+
+Home Assistant 2024.11 or newer; tested against 2026.2. The integration reads two semi-internal structures: automation trigger config and trace data. If a future HA release changes them, it degrades to less detail rather than failing.
+
 ## Development
 
 ```bash
@@ -169,7 +198,3 @@ The tests run a real HA core. They cover:
 The dashboard is a plain web component (`frontend/panel.js`, no build step) that talks to the `downtime_auditor/*` websocket commands.
 
 The icon shows as a broken image in Repairs and on the integration page until a brand icon is submitted to [home-assistant/brands](https://github.com/home-assistant/brands). This is normal for custom integrations.
-
-## Compatibility
-
-Home Assistant 2024.11 or newer; tested against 2026.2. The integration reads two semi-internal structures: automation trigger config and trace data. If a future HA release changes them, it degrades to less detail rather than failing.
