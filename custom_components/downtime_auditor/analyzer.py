@@ -12,15 +12,11 @@ from homeassistant.util import dt as dt_util
 
 from . import schedule
 from .const import (
-    CAT_INTERRUPTED,
-    CAT_MISSED,
-    CAT_POSSIBLE,
-    CAT_SKIPPED,
-    CAT_UNVERIFIABLE,
-    CONF_HIGH,
-    CONF_LOW,
-    CONF_MEDIUM,
+    DEFAULT_SEVERITY,
+    SEVERITY_SOURCE_DEFAULT,
     UNKNOWN_STATES,
+    Confidence,
+    FindingType,
 )
 from .snapshot import (
     as_list,
@@ -37,7 +33,7 @@ from .snapshot import (
 
 _LOGGER = logging.getLogger(__name__)
 
-UNVERIFIABLE_REASONS = {
+LOST_MESSAGE_REASONS = {
     "event": "Events fired while Home Assistant was down are never delivered.",
     "webhook": "Webhook calls made while Home Assistant was down were rejected/lost.",
     "mqtt": "Non-retained MQTT messages published during downtime are lost; "
@@ -49,12 +45,14 @@ UNVERIFIABLE_REASONS = {
     "homeassistant": None,  # start/shutdown triggers are not "missed"
 }
 
+CONFIRMED_IF_CLEAN = {True: Confidence.CONFIRMED, False: Confidence.PROBABLE}
+
 
 @dataclass
 class Finding:
     """One thing worth telling the user about."""
 
-    category: str
+    type: str
     confidence: str
     entity_id: str
     name: str
@@ -67,6 +65,11 @@ class Finding:
     count: int | None = None
     details: dict[str, Any] = field(default_factory=dict)
     item_id: str | None = None  # automation config id / script object id (for UI links)
+    severity: str = DEFAULT_SEVERITY
+    severity_source: str = SEVERITY_SOURCE_DEFAULT
+    severity_base: str = DEFAULT_SEVERITY  # the rating before capping (label or default)
+    severity_reason: str = ""
+    conditions: str | None = None  # pass / fail / unknown; None = not evaluated
 
     def as_dict(self) -> dict:
         """Serialise."""
@@ -111,7 +114,6 @@ class Analyzer:
         hass: HomeAssistant,
         window: Window,
         baseline: dict | None,
-        include_unverifiable: bool,
     ) -> None:
         self.hass = hass
         self.window = window
@@ -119,9 +121,9 @@ class Analyzer:
         self.pre_entities: dict = self.baseline.get("entities") or {}
         self.pre_templates: dict = self.baseline.get("templates") or {}
         self.pre_automations: dict = self.baseline.get("automations") or {}
-        self.include_unverifiable = include_unverifiable
         self.tz = dt_util.get_default_time_zone()
         self._pending_calendar: list[dict] = []
+        self.skipped: list[str] = []  # automations that were off; counted, not reported
 
     # ------------------------------------------------------------------ helpers
 
@@ -167,8 +169,8 @@ class Analyzer:
                 _LOGGER.exception("Failed analysing %s", entity_id)
                 findings.append(
                     Finding(
-                        CAT_UNVERIFIABLE,
-                        CONF_LOW,
+                        FindingType.MISSED,
+                        Confidence.UNKNOWN,
                         entity_id,
                         entity_id,
                         f"Analysis error: {err}",
@@ -182,18 +184,12 @@ class Analyzer:
         state = self.hass.states.get(entity_id)
         name = (state.attributes.get("friendly_name") if state else None) or entity_id
         pre = self.pre_automations.get(entity_id)
-
-        if pre is not None and pre.get("enabled") is False:
-            return [
-                Finding(
-                    CAT_SKIPPED,
-                    CONF_HIGH,
-                    entity_id,
-                    name,
-                    "Automation was turned off before the downtime; nothing was missed.",
-                    item_id=getattr(ent, "unique_id", None),
-                )
-            ]
+        was_enabled = pre.get("enabled") if pre is not None else None
+        if was_enabled is None:  # no baseline for it (or what-if): fall back to its current state
+            was_enabled = not (state is not None and state.state == "off")
+        if not was_enabled:
+            self.skipped.append(entity_id)
+            return []
 
         last_triggered = _parse_dt(state.attributes.get("last_triggered")) if state else None
         fired_after_start = bool(startup_triggered.get(entity_id))
@@ -219,7 +215,7 @@ class Analyzer:
                 results = handler(ctx) if handler else self._t_generic(ctx)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Trigger analysis failed for %s #%s: %s", entity_id, idx, err)
-                results = [self._mk(ctx, CAT_UNVERIFIABLE, CONF_LOW, f"Could not analyse trigger: {err}")]
+                results = [self._mk(ctx, FindingType.MISSED, Confidence.UNKNOWN, f"Could not analyse trigger: {err}")]
             out.extend(r for r in results if r is not None)
 
         if state is not None and state.state == "off":
@@ -227,9 +223,9 @@ class Analyzer:
                 f.details["note"] = "Automation is currently turned off."
         return out
 
-    def _mk(self, ctx: dict, category: str, confidence: str, summary: str, **kw: Any) -> Finding:
+    def _mk(self, ctx: dict, finding_type: str, confidence: str, summary: str, **kw: Any) -> Finding:
         return Finding(
-            category=category,
+            type=finding_type,
             confidence=confidence,
             entity_id=ctx["entity_id"],
             name=ctx["name"],
@@ -256,13 +252,13 @@ class Analyzer:
         return [
             self._mk(
                 ctx,
-                CAT_MISSED,
-                CONF_HIGH if self.window.clean else CONF_MEDIUM,
+                FindingType.MISSED,
+                CONFIRMED_IF_CLEAN[self.window.clean],
                 summary,
                 occurrences=shown,
                 occurrences_iso=[o.isoformat() for o in missed[:200]],
                 count=len(missed),
-                details={"conditions_evaluated": False},
+                details={},
             )
         ]
 
@@ -400,7 +396,7 @@ class Analyzer:
                     return_response=True,
                 )
             except Exception as err:  # noqa: BLE001
-                out.append(self._mk(ctx, CAT_UNVERIFIABLE, CONF_LOW, f"Could not query {eid}: {err}"))
+                out.append(self._mk(ctx, FindingType.MISSED, Confidence.UNKNOWN, f"Could not query {eid}: {err}"))
                 continue
             occs: list[datetime] = []
             titles: list[str] = []
@@ -436,21 +432,20 @@ class Analyzer:
             "before": pre_val,
             "after": post_val,
             "before_captured_at": self.baseline.get("captured_at"),
-            "conditions_evaluated": False,
         }
         if not have:
             return None if post_val is None else self._mk(
                 ctx,
-                CAT_POSSIBLE,
-                CONF_LOW,
+                FindingType.MISSED,
+                Confidence.POSSIBLE,
                 f"No pre-downtime baseline for {target}; now '{post_val}'. Can't tell if it changed.",
                 details=details,
             )
         if post_val in UNKNOWN_STATES and attribute is None:
             return self._mk(
                 ctx,
-                CAT_POSSIBLE,
-                CONF_LOW,
+                FindingType.MISSED,
+                Confidence.POSSIBLE,
                 f"{target} is still '{post_val}' after startup (was '{pre_val}'); re-check once it reports.",
                 details=details,
             )
@@ -468,26 +463,25 @@ class Analyzer:
 
         has_for = conf.get("for") is not None
         if match is None:
-            cat, confd = CAT_POSSIBLE, CONF_LOW
+            confd = Confidence.POSSIBLE
             why = "change detected but match could not be evaluated"
         elif has_for:
-            cat, confd = CAT_POSSIBLE, CONF_MEDIUM
+            confd = Confidence.PROBABLE
             why = "matches, but the `for:` duration can't be verified across the downtime"
             details["for"] = jsonable(conf.get("for"))
         elif changed_after:
-            cat, confd = CAT_POSSIBLE, CONF_MEDIUM
+            confd = Confidence.PROBABLE
             why = (
                 "value changed as integrations came back after startup; the automation did not "
                 "fire, likely because the transition was seen as from 'unavailable'"
             )
         else:
-            cat = CAT_MISSED
-            confd = CONF_HIGH if self.window.clean else CONF_MEDIUM
+            confd = CONFIRMED_IF_CLEAN[self.window.clean]
             why = "transition matches the trigger"
         details["last_changed"] = jsonable(post_state.last_changed) if post_state else None
         return self._mk(
             ctx,
-            cat,
+            FindingType.MISSED,
             confd,
             f"{target} changed '{pre_val}' → '{post_val}' during downtime ({why})",
             details=details,
@@ -538,8 +532,8 @@ class Analyzer:
                     out.append(
                         self._mk(
                             ctx,
-                            CAT_POSSIBLE if conf.get("for") else CAT_MISSED,
-                            CONF_MEDIUM,
+                            FindingType.MISSED,
+                            Confidence.PROBABLE,
                             f"value_template for {eid} crossed into range ({pre_t} → {post_t}) during downtime",
                             details={"before": pre_t, "after": post_t, "above": above, "below": below},
                         )
@@ -573,15 +567,15 @@ class Analyzer:
         key = f"{ctx['entity_id']}#{ctx['idx']}"
         pre = self.pre_templates.get(key)
         post = render_bool(self.hass, src)
-        details = {"template": src, "before": pre, "after": post, "conditions_evaluated": False}
+        details = {"template": src, "before": pre, "after": post}
         if post is not True:
             return []
         if pre is None:
             return [
                 self._mk(
                     ctx,
-                    CAT_POSSIBLE,
-                    CONF_LOW,
+                    FindingType.MISSED,
+                    Confidence.POSSIBLE,
                     "Template is true now, but its value before the downtime is unknown.",
                     details=details,
                 )
@@ -592,8 +586,8 @@ class Analyzer:
             return [
                 self._mk(
                     ctx,
-                    CAT_POSSIBLE if ctx["conf"].get("for") else CAT_MISSED,
-                    CONF_HIGH if self.window.clean else CONF_MEDIUM,
+                    FindingType.MISSED,
+                    Confidence.PROBABLE if ctx["conf"].get("for") else CONFIRMED_IF_CLEAN[self.window.clean],
                     "Template went false → true during downtime. HA doesn't fire a template "
                     "trigger that is already true at startup, so this run was skipped.",
                     details=details,
@@ -625,8 +619,8 @@ class Analyzer:
             if f is not None:
                 f.details["zone"] = zone_id
                 f.details["event"] = event
-                if f.category == CAT_MISSED:
-                    f.confidence = CONF_MEDIUM  # zone name matching is approximate
+                if f.confidence in (Confidence.CONFIRMED, Confidence.PROBABLE):
+                    f.confidence = Confidence.POSSIBLE  # zone name matching is approximate
             out.append(f)
         return out
 
@@ -651,8 +645,7 @@ class Analyzer:
 
         f = self._state_like(ctx, eid, None, matcher)
         if f is not None:
-            f.category = CAT_POSSIBLE
-            f.confidence = CONF_MEDIUM
+            f.confidence = Confidence.POSSIBLE  # device trigger semantics vary per integration
             f.summary = (
                 f"Device trigger '{conf.get('type')}' on {eid}: state changed "
                 f"'{f.details.get('before')}' → '{f.details.get('after')}' during downtime"
@@ -660,7 +653,7 @@ class Analyzer:
         return [f]
 
     def _t_generic(self, ctx: dict) -> list[Finding]:
-        """Any other platform: compare referenced entities, else list as unverifiable."""
+        """Any other platform: compare referenced entities, else a missed trigger of unknown confidence."""
         conf = ctx["conf"]
         platform = ctx["platform"]
         entities = sorted(trigger_entities(self.hass, conf))
@@ -672,8 +665,8 @@ class Analyzer:
                     f.summary = f"[{platform}] {f.summary}"
                 out.append(f)
             return out
-        reason = UNVERIFIABLE_REASONS.get(platform, f"'{platform}' triggers can't be reconstructed after the fact.")
-        if reason is None or not self.include_unverifiable:
+        reason = LOST_MESSAGE_REASONS.get(platform, f"'{platform}' triggers can't be reconstructed after the fact.")
+        if reason is None:
             return []
         details = {"reason": reason}
         if platform == "event":
@@ -682,7 +675,7 @@ class Analyzer:
             details["topic"] = jsonable(conf.get("topic"))
         if platform == "webhook":
             details["webhook_id"] = "(hidden)"
-        return [self._mk(ctx, CAT_UNVERIFIABLE, CONF_LOW, reason, details=details)]
+        return [self._mk(ctx, FindingType.MISSED, Confidence.UNKNOWN, reason, details=details)]
 
 
 def interrupted_findings(running: dict | None, window: Window, clean: bool) -> list[Finding]:
@@ -728,8 +721,8 @@ def interrupted_findings(running: dict | None, window: Window, clean: bool) -> l
             summary += f" (as of last snapshot {_local(captured)})"
         out.append(
             Finding(
-                category=CAT_INTERRUPTED,
-                confidence=CONF_HIGH if clean else CONF_MEDIUM,
+                type=FindingType.INTERRUPTED,
+                confidence=CONFIRMED_IF_CLEAN[clean],
                 entity_id=rec.get("entity_id"),
                 name=rec.get("name") or rec.get("entity_id"),
                 summary=summary,

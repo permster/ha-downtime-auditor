@@ -14,32 +14,32 @@ from homeassistant.util import dt as dt_util
 
 from .analyzer import Finding, Window
 from .const import (
-    CAT_INTERRUPTED,
-    CAT_MISSED,
-    CAT_POSSIBLE,
-    CAT_SKIPPED,
-    CAT_STARTUP_FIRED,
-    CAT_UNVERIFIABLE,
+    CONFIDENCE_LABELS,
     HISTORY_FILE,
     MAX_REPORT_FILES,
     NAME,
     PERSISTENT_NOTIFICATION_ID,
     REPORT_DIR,
+    SEVERITY_LABELS,
+    SEVERITY_SOURCE_DEFAULT,
+    TYPE_LABELS,
+    Confidence,
+    FindingType,
+    Severity,
 )
 from .schedule import fmt_duration
+from .severity import at_least, effective_severity, highest, rank
 
 _LOGGER = logging.getLogger(__name__)
 REPORT_NAME_RE = re.compile(r"^report-(\d{8}-\d{6})(?:-\d+)?\.json$")
 
-SECTION_ORDER = [
-    (CAT_INTERRUPTED, "Interrupted mid-run"),
-    (CAT_MISSED, "Missed triggers"),
-    (CAT_POSSIBLE, "Possibly missed"),
-    (CAT_STARTUP_FIRED, "Fired during startup (check these weren't spurious)"),
-    (CAT_UNVERIFIABLE, "Can't be verified (event-style triggers)"),
-]
+REPORT_SCHEMA = 2
 
-CONF_BADGE = {"high": "", "medium": " _(medium confidence)_", "low": " _(low confidence)_"}
+SECTION_ORDER = [
+    (FindingType.INTERRUPTED, "Interrupted mid-run"),
+    (FindingType.MISSED, "Missed triggers"),
+    (FindingType.FIRED_AT_STARTUP, "Fired at startup (check these weren't spurious)"),
+]
 
 
 def _local(value: Any) -> str:
@@ -51,18 +51,42 @@ def _local(value: Any) -> str:
     return dt_util.as_local(dt).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _summarise(findings: list[dict[str, Any]], attention_min: str | None) -> dict[str, Any]:
+    """Counts and severity roll-ups shared by new and upgraded reports."""
+    counts = {t.value: 0 for t in FindingType}
+    by_severity = {s.value: 0 for s in Severity}
+    for f in findings:
+        counts[f["type"]] = counts.get(f["type"], 0) + 1
+        by_severity[f["severity"]] = by_severity.get(f["severity"], 0) + 1
+    top = highest(f["severity"] for f in findings)
+    attention = (
+        None
+        if attention_min is None
+        else sum(1 for f in findings if at_least(f["severity"], attention_min))
+    )
+    return {
+        "counts": counts,
+        "counts_by_severity": by_severity,
+        "highest_severity": top.value if top else None,
+        "needs_attention": attention,
+    }
+
+
 def build_report(
     window: Window,
     findings: list[Finding],
     meta: dict[str, Any],
+    attention_min: str = Severity.HIGH,
 ) -> dict[str, Any]:
-    """Assemble the structured report."""
-    counts: dict[str, int] = {}
-    for f in findings:
-        counts[f.category] = counts.get(f.category, 0) + 1
-    actionable = sum(counts.get(c, 0) for c in (CAT_INTERRUPTED, CAT_MISSED, CAT_POSSIBLE))
+    """Assemble the structured report.
+
+    `attention_min` is the Repairs threshold; `needs_attention` counts findings at
+    or above it. `actionable` is a deprecated alias of it (removed in v0.6.0).
+    """
+    items = sorted((f.as_dict() for f in findings), key=lambda f: -rank(f["severity"]))
+    summary = _summarise(items, attention_min)
     return {
-        "schema": 1,
+        "schema": REPORT_SCHEMA,
         "generated_at": dt_util.utcnow().isoformat(),
         "window": {
             "start": window.start.isoformat(),
@@ -76,11 +100,26 @@ def build_report(
             if window.clean
             else "last heartbeat before an unclean stop (crash, power loss, kill)",
         },
-        "counts": counts,
-        "actionable": actionable,
+        **summary,
+        "actionable": summary["needs_attention"],
+        "skipped": meta.get("automations_skipped", 0),
         "meta": meta,
-        "findings": [f.as_dict() for f in findings],
+        "findings": items,
     }
+
+
+def refresh_summary(report: dict[str, Any], attention_min: str) -> None:
+    """Recompute ordering and roll-ups after findings' severities changed."""
+    report["findings"].sort(key=lambda f: -rank(f["severity"]))
+    summary = _summarise(report["findings"], attention_min)
+    report.update(summary, actionable=summary["needs_attention"])
+
+
+def _badge(finding: dict[str, Any]) -> str:
+    """'High · Probable' — severity first, confidence second."""
+    sev = SEVERITY_LABELS.get(finding.get("severity"), str(finding.get("severity")))
+    conf = CONFIDENCE_LABELS.get(finding.get("confidence"), str(finding.get("confidence")))
+    return f"{sev} · {conf}"
 
 
 def to_markdown(report: dict[str, Any], json_path: str | None) -> str:
@@ -100,76 +139,161 @@ def to_markdown(report: dict[str, Any], json_path: str | None) -> str:
     if not meta.get("baseline_available", True):
         lines.append("⚠️ No pre-downtime baseline was available (first run after install?), so state checks are limited.")
 
-    by_cat: dict[str, list[dict]] = {}
-    for f in report["findings"]:
-        by_cat.setdefault(f["category"], []).append(f)
+    shown = [f for f in report["findings"] if f.get("severity") != Severity.NONE]
+    hidden = len(report["findings"]) - len(shown)
+    by_type: dict[str, list[dict]] = {}
+    for f in shown:
+        by_type.setdefault(f["type"], []).append(f)
 
-    if not report["actionable"] and not by_cat.get(CAT_STARTUP_FIRED):
+    if not any(worth_keeping(f) for f in shown):
         lines.append("\n✅ Nothing appears to have been missed or interrupted.")
 
-    for cat, title in SECTION_ORDER:
-        items = by_cat.get(cat) or []
+    for ftype, title in SECTION_ORDER:
+        items = by_type.get(ftype) or []
         if not items:
             continue
         lines.append(f"\n### {title} ({len(items)})")
-        if cat == CAT_UNVERIFIABLE:
-            names = sorted({f"{i['name']} ({i.get('platform')})" for i in items})
-            lines.append(", ".join(names[:40]) + (" …" if len(names) > 40 else ""))
-            continue
-        for i in items[:40]:
+        # Unknown-confidence triggers at Low are listed by name only, to keep this short.
+        brief = [i for i in items if i.get("confidence") == Confidence.UNKNOWN and not worth_keeping(i)]
+        full = [i for i in items if i not in brief]
+        for i in full[:40]:
             tid = f" [trigger `{i['trigger_id']}`]" if i.get("trigger_id") else (
                 f" [trigger #{i['trigger_index']}]" if i.get("trigger_index") is not None else ""
             )
             note = f" — _{i['details']['note']}_" if (i.get("details") or {}).get("note") else ""
+            lines.append(f"- **{_badge(i)}** — **{i['name']}** (`{i['entity_id']}`){tid}: {i['summary']}{note}")
+        if len(full) > 40:
+            lines.append(f"- … and {len(full) - 40} more (see JSON report)")
+        if brief:
+            names = sorted({f"{i['name']} ({i.get('platform')})" for i in brief})
             lines.append(
-                f"- **{i['name']}** (`{i['entity_id']}`){tid}: {i['summary']}"
-                f"{CONF_BADGE.get(i.get('confidence'), '')}{note}"
+                "- _Can't be confirmed (event-style triggers):_ "
+                + ", ".join(names[:40])
+                + (" …" if len(names) > 40 else "")
             )
-        if len(items) > 40:
-            lines.append(f"- … and {len(items) - 40} more (see JSON report)")
 
-    skipped = by_cat.get(CAT_SKIPPED) or []
+    if hidden:
+        lines.append(
+            f"\n_{hidden} finding(s) with severity None are not shown "
+            "(conditions would have failed, or rated None)._"
+        )
+    skipped = report.get("skipped") or meta.get("automations_skipped") or 0
     if skipped:
-        lines.append(f"\n_{len(skipped)} automation(s) were off before the downtime and were skipped._")
-    lines.append("\n_Conditions are not evaluated — a 'missed' trigger may not have passed its conditions._")
+        lines.append(f"\n_{skipped} automation(s) were turned off and were skipped._")
+    lines.append(
+        "\n_Conditions are checked where possible: against pre-downtime values after a real outage, "
+        "against recorder history for what-if windows._"
+    )
     if json_path:
         lines.append(f"_Full report: `{json_path}`_")
     return "\n".join(lines)
 
 
 def to_push(report: dict[str, Any]) -> tuple[str, str]:
-    """Short (title, message) for a phone notification."""
+    """Short (title, message) for a phone notification: severity first."""
     w = report["window"]
-    c = report["counts"]
     title = f"HA was down {w['duration']}" + ("" if w["clean_shutdown"] else " (unclean)")
-    parts = []
-    for cat, label in (
-        (CAT_INTERRUPTED, "interrupted"),
-        (CAT_MISSED, "missed"),
-        (CAT_POSSIBLE, "possibly missed"),
-        (CAT_STARTUP_FIRED, "fired at startup"),
-    ):
-        if c.get(cat):
-            parts.append(f"{c[cat]} {label}")
+    by_sev = report.get("counts_by_severity") or {}
+    parts = [
+        f"{by_sev[s]} {SEVERITY_LABELS[s].lower()}"
+        for s in (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW)
+        if by_sev.get(s)
+    ]
     msg = ", ".join(parts) if parts else "Nothing missed or interrupted."
     top = [
-        f"{f['name']}: {f['summary']}"
+        f"[{SEVERITY_LABELS[f['severity']]}] {f['name']}: {f['summary']}"
         for f in report["findings"]
-        if f["category"] in (CAT_INTERRUPTED, CAT_MISSED)
-    ][:3]
+        if at_least(f["severity"], Severity.LOW)
+    ][:3]  # findings are already sorted most severe first
     if top:
         msg += "\n" + "\n".join(f"• {t[:140]}" for t in top)
     return title, msg
 
 
-# Categories that make a downtime worth keeping a full report for.
-KEEP_FULL_CATEGORIES = (CAT_INTERRUPTED, CAT_MISSED, CAT_POSSIBLE, CAT_STARTUP_FIRED)
+def worth_keeping(finding: dict[str, Any]) -> bool:
+    """A finding worth a saved report file (not None, and not just unconfirmable noise)."""
+    sev = finding.get("severity")
+    if sev == Severity.NONE:
+        return False
+    return finding.get("confidence") != Confidence.UNKNOWN or at_least(sev, Severity.MEDIUM)
 
 
 def has_findings(report: dict[str, Any]) -> bool:
-    """True when the report has anything beyond unverifiable/skipped noise."""
-    counts = report.get("counts") or {}
-    return any(counts.get(c) for c in KEEP_FULL_CATEGORIES)
+    """True when the report has anything beyond unconfirmable/None noise."""
+    return any(worth_keeping(f) for f in report.get("findings") or [])
+
+
+# ---------------------------------------------------------------- v0.4 compatibility
+
+LEGACY_TYPES = {
+    "interrupted": FindingType.INTERRUPTED,
+    "missed": FindingType.MISSED,
+    "possibly_missed": FindingType.MISSED,
+    "unverifiable": FindingType.MISSED,
+    "fired_during_startup": FindingType.FIRED_AT_STARTUP,
+}
+LEGACY_REASON = "Recorded before severity ratings existed"
+
+
+def _legacy_confidence(finding: dict[str, Any], clean: bool) -> Confidence:
+    category = finding.get("category")
+    if category == "unverifiable":
+        return Confidence.UNKNOWN
+    if category == "fired_during_startup":
+        return Confidence.CONFIRMED  # it did fire; whether it was spurious is the question
+    old = finding.get("confidence")
+    if old == "high":
+        return Confidence.CONFIRMED if clean else Confidence.PROBABLE
+    if old == "medium":
+        return Confidence.PROBABLE
+    return Confidence.POSSIBLE
+
+
+def upgrade_legacy(obj: Any) -> Any:
+    """Read a v0.4 report or history line in v0.5 terms. Idempotent; never touches files."""
+    if not isinstance(obj, dict) or int(obj.get("schema") or 1) >= REPORT_SCHEMA:
+        return obj
+    out = dict(obj)
+    old_counts = obj.get("counts") or {}
+    counts = {t.value: 0 for t in FindingType}
+    for key, value in old_counts.items():
+        if key in LEGACY_TYPES:
+            counts[LEGACY_TYPES[key]] += int(value or 0)
+    skipped = int(old_counts.get("skipped") or 0)
+
+    if isinstance(obj.get("findings"), list):  # a full report file
+        clean = bool((obj.get("window") or {}).get("clean_shutdown", True))
+        findings = []
+        for f in obj["findings"]:
+            category = f.get("category")
+            if category not in LEGACY_TYPES:
+                continue  # 'skipped' (counted above) or anything unrecognised
+            new = {k: v for k, v in f.items() if k != "category"}
+            new["type"] = LEGACY_TYPES[category].value
+            new["confidence"] = _legacy_confidence(f, clean).value
+            sev, _ = effective_severity(
+                Severity.MEDIUM, SEVERITY_SOURCE_DEFAULT, new["type"], new["confidence"], None
+            )
+            new.update(
+                severity=sev.value,
+                severity_source=SEVERITY_SOURCE_DEFAULT,
+                severity_base=Severity.MEDIUM.value,
+                severity_reason=LEGACY_REASON,
+                conditions=None,
+            )
+            findings.append(new)
+        findings.sort(key=lambda f: -rank(f["severity"]))
+        out["findings"] = findings
+        out.update(_summarise(findings, None))
+        out["counts"] = counts  # keep the recorded totals
+    else:  # a history line: no findings, so no severity
+        out.update(counts=counts, counts_by_severity=None, highest_severity=None, needs_attention=None)
+
+    out["skipped"] = skipped
+    out["actionable"] = obj.get("actionable")
+    out["schema"] = REPORT_SCHEMA
+    out["legacy"] = True
+    return out
 
 
 def _report_time(path: Path) -> datetime:
@@ -236,10 +360,15 @@ def _write_files(base: Path, report: dict[str, Any], report_days: int, history_d
     _append_history(
         base,
         {
+            "schema": REPORT_SCHEMA,
             "generated_at": report["generated_at"],
             "window": report["window"],
             "counts": report["counts"],
-            "actionable": report.get("actionable", 0),
+            "counts_by_severity": report.get("counts_by_severity"),
+            "highest_severity": report.get("highest_severity"),
+            "needs_attention": report.get("needs_attention"),
+            "actionable": report.get("needs_attention"),  # deprecated; removed in v0.6.0
+            "skipped": report.get("skipped", 0),
             "file": path.name if path else None,
         },
         history_days,
@@ -269,6 +398,7 @@ async def async_deliver(
     notify_service: str,
     push_only_on_findings: bool,
     json_path: str | None,
+    push_min_severity: str = Severity.HIGH,
     notification_id: str = PERSISTENT_NOTIFICATION_ID,
 ) -> None:
     """Send the report to the configured outputs."""
@@ -286,8 +416,8 @@ async def async_deliver(
             notification_id=notification_id,
         )
 
-    has_findings = report["actionable"] > 0 or report["counts"].get(CAT_STARTUP_FIRED, 0) > 0
-    if notify_service and (has_findings or not push_only_on_findings):
+    worth_push = any(at_least(f["severity"], push_min_severity) for f in report["findings"])
+    if notify_service and (worth_push or not push_only_on_findings):
         title, message = to_push(report)
         domain, _, service = notify_service.partition(".")
         if not service:

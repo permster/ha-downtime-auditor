@@ -15,25 +15,23 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    CAT_INTERRUPTED,
-    CAT_MISSED,
-    CAT_POSSIBLE,
-    CAT_STARTUP_FIRED,
-    CAT_UNVERIFIABLE,
     DOMAIN,
     NAME,
     PANEL_URL,
     SIGNAL_REPORT_UPDATED,
+    FindingType,
+    Severity,
 )
+from .severity import at_least
 
 MAX_ATTR_FINDINGS = 50
 
-CATEGORY_SENSORS = [
-    (CAT_INTERRUPTED, "Interrupted automations", "mdi:motion-pause-outline"),
-    (CAT_MISSED, "Missed triggers", "mdi:calendar-remove-outline"),
-    (CAT_POSSIBLE, "Possibly missed triggers", "mdi:help-circle-outline"),
-    (CAT_STARTUP_FIRED, "Fired during startup", "mdi:rocket-launch-outline"),
-    (CAT_UNVERIFIABLE, "Unverifiable triggers", "mdi:eye-off-outline"),
+# Unique-id keys match v0.4 for interrupted/missed; fired_at_startup is migrated
+# from its v0.4 unique id in async_migrate_entry.
+TYPE_SENSORS = [
+    (FindingType.INTERRUPTED, "Interrupted automations", "mdi:motion-pause-outline"),
+    (FindingType.MISSED, "Missed triggers", "mdi:calendar-remove-outline"),
+    (FindingType.FIRED_AT_STARTUP, "Fired at startup", "mdi:rocket-launch-outline"),
 ]
 
 
@@ -53,7 +51,9 @@ def compact(finding: dict) -> dict:
         "name": finding.get("name"),
         "entity_id": finding.get("entity_id"),
         "summary": finding.get("summary"),
+        "severity": finding.get("severity"),
         "confidence": finding.get("confidence"),
+        "conditions": finding.get("conditions"),
         "platform": finding.get("platform"),
     }
     if finding.get("trigger_id") is not None:
@@ -72,9 +72,10 @@ async def async_setup_entry(
 ) -> None:
     auditor = hass.data[DOMAIN]
     entities: list[SensorEntity] = [
-        CategorySensor(auditor, entry, cat, name, icon) for cat, name, icon in CATEGORY_SENSORS
+        TypeSensor(auditor, entry, ftype, name, icon) for ftype, name, icon in TYPE_SENSORS
     ]
     entities += [
+        HighestSeveritySensor(auditor, entry),
         DowntimeDurationSensor(auditor, entry),
         TimestampSensor(auditor, entry, "downtime_start", "Last downtime start", "start"),
         TimestampSensor(auditor, entry, "downtime_end", "Last downtime end", "end"),
@@ -108,27 +109,29 @@ class _Base(SensorEntity):
         self.async_write_ha_state()
 
 
-class CategorySensor(_Base):
-    """State = number of findings in a category; attribute `findings` = the list."""
+class TypeSensor(_Base):
+    """State = findings of this type with severity Low or higher; `findings` lists all of them."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "findings"
     _unrecorded_attributes = frozenset({"findings", "window"})
 
-    def __init__(self, auditor: Any, entry: ConfigEntry, category: str, name: str, icon: str) -> None:
-        super().__init__(auditor, entry, category, name)
-        self.category = category
+    def __init__(self, auditor: Any, entry: ConfigEntry, finding_type: str, name: str, icon: str) -> None:
+        super().__init__(auditor, entry, finding_type, name)
+        self.finding_type = finding_type
         self._attr_icon = icon
 
     def _items(self) -> list[dict]:
         rep = self.report
         if not rep:
             return []
-        return [f for f in rep.get("findings", []) if f.get("category") == self.category]
+        return [f for f in rep.get("findings", []) if f.get("type") == self.finding_type]
 
     @property
     def native_value(self) -> int | None:
-        return None if self.report is None else len(self._items())
+        if self.report is None:
+            return None
+        return sum(1 for f in self._items() if at_least(f.get("severity"), Severity.LOW))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -140,6 +143,25 @@ class CategorySensor(_Base):
             "truncated": len(items) > MAX_ATTR_FINDINGS,
             "findings": [compact(f) for f in items[:MAX_ATTR_FINDINGS]],
         }
+
+
+class HighestSeveritySensor(_Base):
+    """Most severe finding in the last report ('none' when nothing was found)."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [s.value for s in Severity]
+    _attr_translation_key = "highest_severity"
+    _attr_icon = "mdi:timeline-alert-outline"
+
+    def __init__(self, auditor: Any, entry: ConfigEntry) -> None:
+        super().__init__(auditor, entry, "highest_severity", "Highest severity")
+
+    @property
+    def native_value(self) -> str | None:
+        rep = self.report
+        if rep is None:
+            return None
+        return rep.get("highest_severity") or Severity.NONE.value
 
 
 class DowntimeDurationSensor(_Base):
@@ -168,8 +190,12 @@ class DowntimeDurationSensor(_Base):
             "start_basis": w.get("start_basis"),
             "ha_version_before": meta.get("ha_version_before"),
             "ha_version_after": meta.get("ha_version_after"),
-            "actionable": rep.get("actionable"),
+            "needs_attention": rep.get("needs_attention"),
+            "actionable": rep.get("needs_attention"),  # deprecated; removed in v0.6.0
+            "highest_severity": rep.get("highest_severity"),
             "counts": rep.get("counts"),
+            "counts_by_severity": rep.get("counts_by_severity"),
+            "skipped": rep.get("skipped"),
             "json_path": meta.get("json_path"),
         }
 

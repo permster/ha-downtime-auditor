@@ -18,17 +18,16 @@ from homeassistant.util import dt as dt_util
 
 from .analyzer import Analyzer, Finding, Window, _parse_dt, interrupted_findings
 from .const import (
-    CAT_STARTUP_FIRED,
     CONF_HEARTBEAT_INTERVAL,
     CONF_INCLUDE_SCRIPTS,
-    CONF_INCLUDE_UNVERIFIABLE,
-    CONF_LOW,
     CONF_MAX_WINDOW_DAYS,
     CONF_NOTIFY_SERVICE,
     CONF_PERSISTENT_NOTIFICATION,
+    CONF_PUSH_MIN_SEVERITY,
     CONF_PUSH_ONLY_ON_FINDINGS,
     CONF_REPAIRS,
-    CONF_REPAIRS_POSSIBLE,
+    CONF_REPAIRS_MIN_SEVERITY,
+    CONF_SHOW_SEVERITY_NONE,
     CONF_HISTORY_DAYS,
     CONF_REPORT_DAYS,
     CONF_SIDEBAR_PANEL,
@@ -36,13 +35,15 @@ from .const import (
     CONF_WRITE_JSON,
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_INCLUDE_SCRIPTS,
-    DEFAULT_INCLUDE_UNVERIFIABLE,
     DEFAULT_MAX_WINDOW_DAYS,
     DEFAULT_NOTIFY_SERVICE,
     DEFAULT_PERSISTENT_NOTIFICATION,
+    DEFAULT_PUSH_MIN_SEVERITY,
     DEFAULT_PUSH_ONLY_ON_FINDINGS,
     DEFAULT_REPAIRS,
-    DEFAULT_REPAIRS_POSSIBLE,
+    DEFAULT_REPAIRS_MIN_SEVERITY,
+    DEFAULT_SEVERITY,
+    DEFAULT_SHOW_SEVERITY_NONE,
     DEFAULT_HISTORY_DAYS,
     DEFAULT_REPORT_DAYS,
     DEFAULT_SIDEBAR_PANEL,
@@ -51,11 +52,26 @@ from .const import (
     EVENT_REPORT,
     PERSISTENT_NOTIFICATION_ID,
     SIGNAL_REPORT_UPDATED,
+    SEVERITY_SOURCE_DEFAULT,
+    SEVERITY_SOURCE_LABEL,
     STORAGE_KEY,
     STORAGE_VERSION,
+    Confidence,
+    FindingType,
+    Severity,
 )
+from .conditions import (
+    BaselineSource,
+    StateSource,
+    async_history_source,
+    condition_configs,
+    condition_entities,
+    evaluate_finding,
+)
+from .labels import SeverityLookup, async_create_labels
 from .repairs import async_sync_issues
-from .report import async_deliver, async_write_json, build_report
+from .report import async_deliver, async_write_json, build_report, refresh_summary, upgrade_legacy
+from .severity import effective_severity
 from .snapshot import (
     automation_entities,
     capture_baseline,
@@ -75,11 +91,12 @@ DEFAULTS = {
     CONF_REPORT_DAYS: DEFAULT_REPORT_DAYS,
     CONF_HISTORY_DAYS: DEFAULT_HISTORY_DAYS,
     CONF_INCLUDE_SCRIPTS: DEFAULT_INCLUDE_SCRIPTS,
-    CONF_INCLUDE_UNVERIFIABLE: DEFAULT_INCLUDE_UNVERIFIABLE,
     CONF_MAX_WINDOW_DAYS: DEFAULT_MAX_WINDOW_DAYS,
     CONF_SIDEBAR_PANEL: DEFAULT_SIDEBAR_PANEL,
     CONF_REPAIRS: DEFAULT_REPAIRS,
-    CONF_REPAIRS_POSSIBLE: DEFAULT_REPAIRS_POSSIBLE,
+    CONF_REPAIRS_MIN_SEVERITY: DEFAULT_REPAIRS_MIN_SEVERITY,
+    CONF_PUSH_MIN_SEVERITY: DEFAULT_PUSH_MIN_SEVERITY,
+    CONF_SHOW_SEVERITY_NONE: DEFAULT_SHOW_SEVERITY_NONE,
 }
 
 SCHEDULE_PLATFORMS = {"time", "time_pattern", "sun", "calendar"}
@@ -111,7 +128,7 @@ class DowntimeAuditor:
 
     async def async_start(self) -> None:
         self.prev = await self.store.async_load() or {}
-        self.last_report = self.prev.get("last_report")
+        self.last_report = upgrade_legacy(self.prev.get("last_report"))
         now = dt_util.utcnow()
         self.data = {
             "session": {
@@ -126,7 +143,9 @@ class DowntimeAuditor:
             "running": None,
             "last_report": self.last_report,
             "repair_issues": list(self.prev.get("repair_issues") or []),
+            "labels_created": bool(self.prev.get("labels_created")),
         }
+        await self._async_create_labels_once()
 
         # Shutdown jobs run *before* integrations (and running scripts) are stopped.
         remove = self.hass.async_add_shutdown_job(HassJob(self._async_on_shutdown, cancel_on_shutdown=False))
@@ -319,12 +338,14 @@ class DowntimeAuditor:
             truncated = True
         window = Window(start=start, end=end, clean=clean)
 
-        analyzer = Analyzer(self.hass, window, self.prev.get("baseline"), self.opt(CONF_INCLUDE_UNVERIFIABLE))
+        analyzer = Analyzer(self.hass, window, self.prev.get("baseline"))
         findings: list[Finding] = []
         findings += interrupted_findings(self.prev.get("running"), window, clean)
         findings += analyzer.analyze(self.startup_triggered)
         findings += await analyzer.async_analyze_calendars()
         findings += self._startup_fired_findings()
+        self._check_conditions(findings, BaselineSource((self.prev.get("baseline") or {}).get("entities") or {}))
+        self._rate(findings)
 
         n_auto, n_trig = self._counts()
         meta = {
@@ -335,14 +356,100 @@ class DowntimeAuditor:
             "analysed_at": dt_util.utcnow().isoformat(),
             "startup_delay_seconds": int(self.opt(CONF_STARTUP_DELAY)),
             "automations_checked": n_auto,
+            "automations_skipped": len(analyzer.skipped),
             "triggers_checked": n_trig,
             "baseline_available": bool(self.prev.get("baseline")),
             "baseline_captured_at": (self.prev.get("baseline") or {}).get("captured_at"),
             "window_truncated_to_days": max_days if truncated else None,
         }
-        report = build_report(window, findings, meta)
+        report = build_report(window, findings, meta, self.opt(CONF_REPAIRS_MIN_SEVERITY))
         await self._async_publish(report)
         return report
+
+    @staticmethod
+    def _base_severity(lookup: SeverityLookup, entity_id: str) -> tuple[Severity, str]:
+        """How much an automation/script matters before any capping: its label, else Medium."""
+        if (sev := lookup.get(entity_id)) is not None:
+            return sev, SEVERITY_SOURCE_LABEL
+        return DEFAULT_SEVERITY, SEVERITY_SOURCE_DEFAULT
+
+    def _rate(self, findings: list[Finding]) -> None:
+        """Fill in each finding's effective severity."""
+        lookup = SeverityLookup(self.hass)
+        for f in findings:
+            base, source = self._base_severity(lookup, f.entity_id)
+            f.severity, f.severity_reason = self._severity(base, source, f.type, f.confidence, f.details)
+            f.severity_source = source
+            f.severity_base = base.value
+
+    @staticmethod
+    def _severity(base: Severity, source: str, ftype: str, confidence: str, details: dict) -> tuple[Severity, str]:
+        cond = (details or {}).get("conditions") or {}
+        sev, reason = effective_severity(base, source, ftype, confidence, cond.get("result"))
+        if cond.get("result") == "fail" and cond.get("why"):
+            reason = f"{reason}: {cond['why']}"
+        elif cond.get("likely") == "fail":
+            reason = f"{reason}; conditions would probably have failed (pre-downtime values)"
+        return sev, reason
+
+    # Conditions are checked only where the trigger very likely did fire.
+    CONDITION_CONFIDENCE = (Confidence.CONFIRMED, Confidence.PROBABLE)
+
+    def _condition_targets(self, findings: list[Finding]) -> list[tuple[Finding, list[dict]]]:
+        autos = {getattr(e, "entity_id", None): e for e in automation_entities(self.hass)}
+        out = []
+        for f in findings:
+            if f.type != FindingType.MISSED or f.confidence not in self.CONDITION_CONFIDENCE:
+                continue
+            if (ent := autos.get(f.entity_id)) is None or not (confs := condition_configs(ent)):
+                continue
+            out.append((f, confs))
+        return out
+
+    def _check_conditions(self, findings: list[Finding], source: StateSource, targets=None) -> None:
+        """Would the automation's conditions have passed when it should have fired?"""
+        for f, confs in targets if targets is not None else self._condition_targets(findings):
+            trigger_id = f.trigger_id if f.trigger_id is not None else (
+                str(f.trigger_index) if f.trigger_index is not None else None
+            )
+            try:
+                result = evaluate_finding(self.hass, confs, source, trigger_id, f.occurrences_iso)
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Condition check failed for %s", f.entity_id, exc_info=True)
+                continue
+            f.conditions = result["result"]
+            f.details["conditions"] = result
+
+    async def async_rerate_last_report(self) -> None:
+        """Re-apply labels to the last report after a rating changed (dashboard selector)."""
+        rep = self.last_report
+        if not rep or rep.get("legacy"):
+            return  # old reports keep "Recorded before severity ratings existed"
+        lookup = SeverityLookup(self.hass)
+        for f in rep.get("findings") or []:
+            base, source = self._base_severity(lookup, f["entity_id"])
+            sev, reason = self._severity(base, source, f["type"], f["confidence"], f.get("details") or {})
+            f.update(severity=sev.value, severity_source=source, severity_base=base.value, severity_reason=reason)
+        refresh_summary(rep, self.opt(CONF_REPAIRS_MIN_SEVERITY))
+        if self.opt(CONF_REPAIRS):
+            self.data["repair_issues"] = async_sync_issues(
+                self.hass, rep, self.data.get("repair_issues") or [], self.opt(CONF_REPAIRS_MIN_SEVERITY)
+            )
+        if self.active:
+            await self.store.async_save(self.data)
+        async_dispatcher_send(self.hass, SIGNAL_REPORT_UPDATED)
+
+    async def _async_create_labels_once(self) -> None:
+        """Create the severity labels on first setup only; never again automatically."""
+        if self.data.get("labels_created"):
+            return
+        created = async_create_labels(self.hass)
+        if created:
+            _LOGGER.info("Created severity labels: %s", ", ".join(created))
+        self.data["labels_created"] = True
+        # Persist the flag without replacing the previous session, which the
+        # startup analysis still needs.
+        await self.store.async_save({**self.prev, "labels_created": True})
 
     def _startup_fired_findings(self) -> list[Finding]:
         out = []
@@ -352,8 +459,8 @@ class DowntimeAuditor:
             name = runs[0].get("name") or eid
             out.append(
                 Finding(
-                    category=CAT_STARTUP_FIRED,
-                    confidence=CONF_LOW,
+                    type=FindingType.FIRED_AT_STARTUP,
+                    confidence=Confidence.CONFIRMED,
                     entity_id=eid,
                     name=name,
                     summary=f"Fired {len(runs)}× in the first {int(self.opt(CONF_STARTUP_DELAY))}s after startup"
@@ -376,11 +483,11 @@ class DowntimeAuditor:
         self.data["last_report"] = report
         if self.opt(CONF_REPAIRS):
             self.data["repair_issues"] = async_sync_issues(
-                self.hass, report, self.data.get("repair_issues") or [], self.opt(CONF_REPAIRS_POSSIBLE)
+                self.hass, report, self.data.get("repair_issues") or [], self.opt(CONF_REPAIRS_MIN_SEVERITY)
             )
         else:
             self.data["repair_issues"] = async_sync_issues(
-                self.hass, None, self.data.get("repair_issues") or [], False
+                self.hass, None, self.data.get("repair_issues") or [], Severity.HIGH
             )
         async_dispatcher_send(self.hass, SIGNAL_REPORT_UPDATED)
         await async_deliver(
@@ -390,20 +497,25 @@ class DowntimeAuditor:
             notify_service=(self.opt(CONF_NOTIFY_SERVICE) or "").strip(),
             push_only_on_findings=self.opt(CONF_PUSH_ONLY_ON_FINDINGS),
             json_path=json_path,
+            push_min_severity=self.opt(CONF_PUSH_MIN_SEVERITY),
         )
         self.hass.bus.async_fire(
             EVENT_REPORT,
             {
                 "window": report["window"],
                 "counts": report["counts"],
-                "actionable": report["actionable"],
+                "counts_by_severity": report["counts_by_severity"],
+                "highest_severity": report["highest_severity"],
+                "needs_attention": report["needs_attention"],
+                "actionable": report["needs_attention"],  # deprecated; removed in v0.6.0
+                "skipped": report["skipped"],
                 "json_path": json_path,
             },
         )
 
     async def async_dismiss_repairs(self) -> int:
         ids = self.data.get("repair_issues") or []
-        async_sync_issues(self.hass, None, ids, False)
+        async_sync_issues(self.hass, None, ids, Severity.HIGH)
         self.data["repair_issues"] = []
         await self.store.async_save(self.data)
         return len(ids)
@@ -424,11 +536,18 @@ class DowntimeAuditor:
     async def async_analyze_window(self, start: datetime, end: datetime, notify: bool) -> dict:
         """What-if: which schedule-based triggers would a downtime in [start, end] miss?"""
         window = Window(start=dt_util.as_utc(start), end=dt_util.as_utc(end), clean=True)
-        analyzer = Analyzer(self.hass, window, {}, include_unverifiable=False)
+        analyzer = Analyzer(self.hass, window, {})
         analyzer._covered = lambda occ, lt: False  # type: ignore[method-assign]  # what-if ignores real runs
         findings = [
             f for f in analyzer.analyze({}) if f.platform in SCHEDULE_PLATFORMS
         ] + await analyzer.async_analyze_calendars()
+        targets = self._condition_targets(findings)
+        needed: set[str] = set()
+        for _f, confs in targets:
+            needed |= set(condition_entities(self.hass, confs))
+        source = await async_history_source(self.hass, needed, window.start, window.end)
+        self._check_conditions(findings, source, targets)
+        self._rate(findings)
         n_auto, n_trig = self._counts()
         report = build_report(
             window,
@@ -436,9 +555,13 @@ class DowntimeAuditor:
             {
                 "what_if": True,
                 "automations_checked": n_auto,
+                "automations_skipped": len(analyzer.skipped),
                 "triggers_checked": n_trig,
-                "note": "Simulation: only time, time_pattern, sun and calendar triggers are evaluated.",
+                "note": "Simulation: only time, time_pattern, sun and calendar triggers are evaluated; "
+                "conditions are checked against recorder history.",
+                "conditions_basis": source.basis,
             },
+            self.opt(CONF_REPAIRS_MIN_SEVERITY),
         )
         if notify:
             await async_deliver(

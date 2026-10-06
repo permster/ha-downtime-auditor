@@ -17,3 +17,4 @@ analyze_window:
 resend_last_report:
 snapshot_now:
 dismiss_repairs:
+create_severity_labels:

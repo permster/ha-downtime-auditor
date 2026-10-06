@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_mock_service
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_capture_events,
+    async_mock_service,
+)
 
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
@@ -46,10 +50,17 @@ async def test_full_restart_cycle(hass, enable_custom_integrations):
     t_missed = (now - timedelta(hours=1)).strftime("%H:%M:%S")
     await _setup(hass, t_missed)
     push = async_mock_service(hass, "notify", "test_push")
+    events = async_capture_events(hass, "downtime_auditor_report")
 
     entry = MockConfigEntry(
         domain=DOMAIN,
-        options={"startup_delay": 0, "notify_service": "notify.test_push", "write_json": True},
+        version=2,
+        options={
+            "startup_delay": 0,
+            "notify_service": "notify.test_push",
+            "write_json": True,
+            "push_min_severity": "medium",  # unrated automations are Medium
+        },
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -101,32 +112,55 @@ async def test_full_restart_cycle(hass, enable_custom_integrations):
         by.setdefault(f["entity_id"], []).append(f)
 
     def cat(eid):
-        return [f["category"] for f in by.get(eid, [])]
+        return [f["type"] for f in by.get(eid, [])]
+
+    def conf(eid):
+        return [f["confidence"] for f in by.get(eid, [])]
 
     assert cat("automation.long_runner")[0] == "interrupted"
     interrupted = by["automation.long_runner"][0]["summary"]
     assert "delay" in interrupted and "elapsed" in interrupted
     assert "(waiting)" in by["script.slow"][0]["summary"]
-    assert cat("automation.morning") == ["missed"]
-    assert cat("automation.door") == ["missed"]
-    assert cat("automation.window") == ["possibly_missed"]  # has for:
+    assert by["automation.long_runner"][0]["confidence"] == "confirmed"
+    assert cat("automation.morning") == ["missed"] and conf("automation.morning") == ["confirmed"]
+    assert cat("automation.door") == ["missed"] and conf("automation.door") == ["confirmed"]
+    assert cat("automation.window") == ["missed"] and conf("automation.window") == ["probable"]  # has for:
     assert cat("automation.garage_closed") == ["missed"]  # from on -> off
     assert cat("automation.flag") == ["missed"]  # template false -> true
     assert cat("automation.hot") == ["missed"]  # 20 -> 35 above 30
-    assert cat("automation.evt") == ["unverifiable"]
+    evt = by["automation.evt"][0]
+    assert (evt["type"], evt["confidence"], evt["severity"]) == ("missed", "unknown", "low")
+    assert "capped at Low" in evt["severity_reason"]
     pat = by["automation.every15"][0]
-    assert pat["category"] == "missed" and pat["count"] == 8
-    assert cat("automation.disabled") == ["skipped"]
+    assert pat["type"] == "missed" and pat["count"] == 8
+    morning = by["automation.morning"][0]
+    assert (morning["severity"], morning["severity_source"]) == ("medium", "default")
+    assert "automation.disabled" not in by  # off before the downtime: not a finding
+    assert report["meta"]["automations_skipped"] == 1
     assert "automation.on_start" not in by
 
     assert report["window"]["clean_shutdown"] is True
     path = report["meta"]["json_path"]
     assert path and Path(path).exists()
-    assert json.loads(Path(path).read_text())["counts"]["missed"] >= 6
-    assert (Path(path).parent.parent / "history.jsonl").exists()
+    saved_report = json.loads(Path(path).read_text())
+    assert saved_report["schema"] == 2 and saved_report["counts"]["missed"] >= 6
+    assert set(saved_report["counts"]) == {"interrupted", "missed", "fired_at_startup"}
+    history = (Path(path).parent.parent / "history.jsonl").read_text().splitlines()
+    line = json.loads(history[-1])
+    assert line["schema"] == 2 and line["highest_severity"] == "medium"
+    assert line["actionable"] == line["needs_attention"] == 0  # default Repairs threshold is High
 
-    notif = hass.states.get("persistent_notification.downtime_auditor_report")
-    assert len(push) == 1 and "missed" in push[0].data["message"]
+    assert len(push) == 1 and "[Medium]" in push[0].data["message"]
+
+    assert len(events) == 1
+    ev = events[0].data
+    assert set(ev) == {
+        "window", "counts", "counts_by_severity", "highest_severity",
+        "needs_attention", "actionable", "skipped", "json_path",
+    }
+    assert ev["actionable"] == ev["needs_attention"] == 0
+    assert ev["skipped"] == 1 and ev["highest_severity"] == "medium"
+    assert ev["counts_by_severity"]["low"] >= 2  # the two event-trigger automations
     print("\n==== PUSH ====\n", push[0].data["title"], "\n", push[0].data["message"])
     from custom_components.downtime_auditor.report import to_markdown
     print("\n==== NOTIFICATION ====\n" + to_markdown(report, path))
@@ -155,7 +189,7 @@ async def test_unclean_uses_heartbeat_and_covered(hass, enable_custom_integratio
     new.started_at = dt_util.utcnow() + timedelta(seconds=1)
     report = await new._async_analyse_previous_downtime()
     assert report["window"]["clean_shutdown"] is False
-    cats = [f["category"] for f in report["findings"] if f["entity_id"] == "automation.morning"]
+    cats = [f["type"] for f in report["findings"] if f["entity_id"] == "automation.morning"]
     assert cats == []  # covered by last_triggered
 
 
@@ -176,6 +210,32 @@ async def test_what_if_service(hass, enable_custom_integrations):
     ids = {f["entity_id"] for f in resp["findings"]}
     assert "automation.morning" in ids and "automation.every15" in ids
     assert "automation.door" not in ids
+    assert "automation.disabled" not in ids  # off now: never part of a what-if
+    assert resp["meta"]["automations_skipped"] == 1
+
+
+async def test_off_without_baseline_is_skipped(hass, enable_custom_integrations):
+    """No shutdown snapshot: an automation that is off now isn't reported."""
+    now = dt_util.now()
+    await _setup(hass, (now - timedelta(minutes=30)).strftime("%H:%M:%S"))
+    entry = MockConfigEntry(domain=DOMAIN, options={"startup_delay": 0, "write_json": False})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    auditor = hass.data[DOMAIN]
+    await auditor._async_heartbeat(dt_util.utcnow())
+    saved = copy.deepcopy(auditor.data)
+    saved["baseline"] = None
+    saved["session"]["last_heartbeat"] = (dt_util.utcnow() - timedelta(hours=1)).isoformat()
+
+    new = DowntimeAuditor(hass, entry)
+    new.prev = saved
+    new.started_at = dt_util.utcnow()
+    report = await new._async_analyse_previous_downtime()
+    ids = {f["entity_id"] for f in report["findings"]}
+    assert "automation.disabled" not in ids
+    assert "automation.morning" in ids  # same trigger, but on: still reported
+    assert report["meta"]["automations_skipped"] == 1
 
 
 async def test_config_flow(hass, enable_custom_integrations):
@@ -193,7 +253,6 @@ async def test_config_flow(hass, enable_custom_integrations):
             "heartbeat_interval": 60,
             "startup_delay": 30,
             "include_scripts": True,
-            "include_unverifiable": True,
             "max_window_days": 14,
         },
     )
@@ -244,7 +303,7 @@ async def test_real_boot_path_and_shutdown_job(hass, enable_custom_integrations,
     assert auditor.active
     rep = auditor.last_report
     assert rep and rep["window"]["clean_shutdown"] is False
-    ids = {f["entity_id"]: f["category"] for f in rep["findings"]}
+    ids = {f["entity_id"]: f["type"] for f in rep["findings"]}
     assert ids.get("automation.morning") == "missed"
     assert ids.get("automation.door") == "missed"
     assert rep["meta"]["ha_version_before"] == "2026.1.0"
@@ -270,14 +329,19 @@ async def test_entities_repairs_and_websocket(hass, enable_custom_integrations, 
 
     now = dt_util.now()
     await _setup(hass, (now - timedelta(hours=1)).strftime("%H:%M:%S"))
-    entry = MockConfigEntry(domain=DOMAIN, options={"startup_delay": 0, "write_json": True})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        options={"startup_delay": 0, "write_json": True, "repairs_min_severity": "medium"},
+    )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     auditor = hass.data[DOMAIN]
 
-    # Before any report, category sensors are unknown
+    # Before any report, type sensors are unknown
     assert hass.states.get("sensor.downtime_auditor_missed_triggers").state == "unknown"
+    assert hass.states.get("sensor.downtime_auditor_highest_severity").state == "unknown"
 
     await auditor._async_on_shutdown()
     saved = copy.deepcopy(auditor.data)
@@ -300,10 +364,17 @@ async def test_entities_repairs_and_websocket(hass, enable_custom_integrations, 
     dur = hass.states.get("sensor.downtime_auditor_last_downtime_duration")
     assert dur.attributes["unit_of_measurement"] in ("min", "s")
 
+    assert hass.states.get("sensor.downtime_auditor_highest_severity").state == "medium"
+    medium = [f for f in missed.attributes["findings"] if f["severity"] == "medium"]
+    low = [f for f in missed.attributes["findings"] if f["severity"] == "low"]
+    assert medium and low and int(missed.state) == len(medium) + len(low)
+
     reg = ir.async_get(hass)
     ours = [i for (d, _), i in reg.issues.items() if d == DOMAIN]
-    assert len(ours) == int(missed.state)
+    assert len(ours) == len(medium)  # Low (event-style) findings are below the threshold
     assert all(i.translation_key == "missed" for i in ours)
+    assert all(i.severity == ir.IssueSeverity.WARNING for i in ours)
+    assert all(i.translation_placeholders["severity"] == "Medium" for i in ours)
     first_ids = set(auditor.data["repair_issues"])
 
     # A second report replaces the previous issues
@@ -331,8 +402,8 @@ async def test_entities_repairs_and_websocket(hass, enable_custom_integrations, 
     # Newest first. A downtime only gets a saved report if something was found.
     assert msg["success"] and len(msg["result"]) == 2
     for item in msg["result"]:
-        found = any(item["counts"].get(c) for c in ("interrupted", "missed", "possibly_missed", "fired_during_startup"))
-        assert item["available"] == found == (item["file"] is not None)
+        assert item["schema"] == 2 and "legacy" not in item
+        assert item["available"] == (item["file"] is not None)
     assert msg["result"][1]["available"]
     first_file = msg["result"][1]["file"]
     await client.send_json({"id": 3, "type": "downtime_auditor/report", "file": first_file})
@@ -400,19 +471,20 @@ def test_retention_by_age_and_empty_reports(tmp_path):
         + json.dumps({"generated_at": (now - timedelta(days=10)).isoformat(), "file": None}) + "\n"
     )
 
-    def make(counts):
+    def make(*findings):
         return {
             "generated_at": now.isoformat(),
             "window": {"start": now.isoformat(), "end": now.isoformat()},
-            "counts": counts,
-            "actionable": sum(v for k, v in counts.items() if k != "unverifiable"),
-            "findings": [],
+            "counts": {"missed": len(findings)},
+            "findings": [
+                {"type": "missed", "confidence": c, "severity": s} for c, s in findings
+            ],
         }
 
-    # Clean restart with only unverifiable noise -> no report file
-    assert rep._write_files(base, make({"unverifiable": 3}), 30, 365) is None
-    # Restart with a missed trigger -> report file
-    path = rep._write_files(base, make({"missed": 1}), 30, 365)
+    # Clean restart with only event-style (Unknown, Low) or None findings -> no report file
+    assert rep._write_files(base, make(("unknown", "low"), ("unknown", "low"), ("confirmed", "none")), 30, 365) is None
+    # Restart with a confirmed missed trigger -> report file
+    path = rep._write_files(base, make(("confirmed", "medium")), 30, 365)
     assert path and Path(path).exists()
 
     names = {p.name for p in reports.glob("report-*.json")}

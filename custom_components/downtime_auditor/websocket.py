@@ -14,7 +14,17 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, HISTORY_FILE, REPORT_DIR
+from .const import (
+    CONF_PUSH_MIN_SEVERITY,
+    CONF_REPAIRS_MIN_SEVERITY,
+    CONF_SHOW_SEVERITY_NONE,
+    DOMAIN,
+    HISTORY_FILE,
+    REPORT_DIR,
+    Severity,
+)
+from .labels import async_create_labels, async_set_severity
+from .report import upgrade_legacy
 from .snapshot import capture_running
 
 REPORT_FILE_RE = re.compile(r"^report-\d{8}-\d{6}(-\d{1,4})?\.json$")
@@ -33,6 +43,8 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_report)
     websocket_api.async_register_command(hass, ws_history)
     websocket_api.async_register_command(hass, ws_what_if)
+    websocket_api.async_register_command(hass, ws_set_severity)
+    websocket_api.async_register_command(hass, ws_create_severity_labels)
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/status"})
@@ -57,6 +69,9 @@ def ws_status(hass: HomeAssistant, connection: websocket_api.ActiveConnection, m
             "baseline_automations": len(baseline.get("automations") or {}),
             "running_now": capture_running(hass, auditor.opt("include_scripts")),
             "json_enabled": bool(auditor.opt("write_json")),
+            "repairs_min_severity": auditor.opt(CONF_REPAIRS_MIN_SEVERITY),
+            "push_min_severity": auditor.opt(CONF_PUSH_MIN_SEVERITY),
+            "show_severity_none": bool(auditor.opt(CONF_SHOW_SEVERITY_NONE)),
             "now": dt_util.utcnow().isoformat(),
         },
     )
@@ -66,7 +81,7 @@ def _read_report(base: Path, name: str | None) -> dict | None:
     path = base / "last_report.json" if not name else base / "reports" / name
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    return upgrade_legacy(json.loads(path.read_text(encoding="utf-8")))
 
 
 @websocket_api.websocket_command(
@@ -98,7 +113,7 @@ def _read_history(base: Path, limit: int) -> list[dict]:
     out = []
     for line in lines:
         try:
-            item = json.loads(line)
+            item = upgrade_legacy(json.loads(line))
         except ValueError:
             continue
         name = item.get("file")
@@ -140,3 +155,35 @@ async def ws_what_if(hass: HomeAssistant, connection: websocket_api.ActiveConnec
         return
     report = await auditor.async_analyze_window(start, end, notify=False)
     connection.send_result(msg["id"], report)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_severity",
+        vol.Required("entity_id"): vol.All(cv.entity_id, cv.entity_domain(("automation", "script"))),
+        vol.Required("severity"): vol.Any(None, vol.In([s.value for s in Severity])),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_set_severity(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Rate an automation/script by swapping its downtime_auditor_sev label (null = unrated)."""
+    severity = Severity(msg["severity"]) if msg["severity"] else None
+    try:
+        async_set_severity(hass, msg["entity_id"], severity)
+    except ValueError as err:
+        connection.send_error(msg["id"], "not_found", str(err))
+        return
+    if (auditor := _auditor(hass)) is not None:
+        await auditor.async_rerate_last_report()
+    connection.send_result(msg["id"], {"entity_id": msg["entity_id"], "severity": msg["severity"]})
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/create_severity_labels"})
+@websocket_api.require_admin
+@callback
+def ws_create_severity_labels(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Dashboard button: create any missing severity labels."""
+    connection.send_result(msg["id"], {"created": async_create_labels(hass)})

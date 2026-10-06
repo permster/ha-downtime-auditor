@@ -6,22 +6,22 @@
 After every restart, crash or power loss, Downtime Auditor tells you:
 
 - **Interrupted:** every automation and script that was mid-run when HA went down. It shows the step it was stuck on (for example `delay 00:10:00`), how far it had got, and what triggered it.
-- **Missed:** every automation trigger that would have fired while HA was down. This covers time, time pattern, sun, calendar, state, numeric state, template and zone triggers.
-- **Possibly missed:** matches that can't be confirmed, such as `for:` durations, device triggers, entities still `unavailable`, and triggers with no baseline.
-- **Fired during startup:** automations that fired in the first N seconds after boot. These are often spurious `unavailable → on` transitions.
-- **Unverifiable:** event, webhook, MQTT, tag and conversation triggers. Anything sent to these while HA was down is lost and can't be reconstructed.
+- **Missed:** every automation trigger that should have fired while HA was down: time, time pattern, sun, calendar, state, numeric state, template, zone and device triggers, plus event-style triggers (event, webhook, MQTT, tag, conversation) whose messages were lost.
+- **Fired at startup:** automations that fired in the first N seconds after boot. These are often spurious `unavailable → on` transitions.
+
+Each finding also says **how sure** it is (confidence) and **how much it matters** (severity, which you set per automation with a label). It checks the automation's **conditions** at the missed time, so a trigger whose conditions would have failed doesn't bother you. See [Severity, confidence and conditions](#severity-confidence-and-conditions).
 
 It only reports. It never re-runs anything.
 
 Results show up in four places:
 
 1. **A sidebar dashboard** (admins only) with four tabs:
-   - **Last report:** a summary, category tiles you can click to filter, a timeline of the downtime showing each missed time, and a searchable list of findings. Each finding expands to show before/after values, due times and the step a run stopped at, with links to the automation's editor and traces.
+   - **Last report:** a summary, type tiles and filters (minimum severity, confidence, show None), a timeline of the downtime colored by severity, and a searchable list of findings. Each finding expands to show its severity and why, a selector to rate the automation, the condition check, before/after values, due times and the step a run stopped at, with links to the automation's editor and traces (Ctrl/middle-click opens a new tab). The dashboard remembers where you were when you come back from the editor.
    - **History:** every restart, with a duration chart. Click an entry to open its full report.
-   - **Live status:** heartbeat health and what's running right now, i.e. what *would* be interrupted if HA stopped this instant.
+   - **Live status:** heartbeat health, what's running right now (what *would* be interrupted if HA stopped this instant), and a button to create the severity labels.
    - **What-if:** pick any time window and see which scheduled triggers a downtime then would miss.
-2. **Settings → Repairs:** one issue per interrupted or missed finding, the way Spook raises its issues. Previous issues are replaced by each new report. You can ignore them individually or clear them with a service.
-3. **Entities** (Watchman-style) on a *Downtime Auditor* device: one count sensor per category, with the findings in a `findings` attribute (excluded from the recorder), plus duration and timestamp sensors and problem binary sensors.
+2. **Settings → Repairs:** one issue per finding at or above a minimum severity, the way Spook raises its issues. Previous issues are replaced by each new report. You can ignore them individually or clear them with a service.
+3. **Entities** (Watchman-style) on a *Downtime Auditor* device: one count sensor per finding type, with the findings in a `findings` attribute (excluded from the recorder), a highest-severity sensor, duration and timestamp sensors, and problem binary sensors.
 4. **JSON history** under `/config/downtime_auditor/` (see [History and retention](#history-and-retention)), plus an optional phone push. A persistent notification is also available but is off by default.
 
 ![Dashboard](docs/dashboard.png)
@@ -43,29 +43,92 @@ Results show up in four places:
 
 | Trigger | How it's checked | Confidence |
 |---|---|---|
-| `time` (fixed, `input_datetime`, timestamp `sensor`, offset, `weekday`) | Computes every occurrence in the window, using the helper's value from **before** the downtime. | high |
-| `time_pattern` | Replicates HA's pattern and defaulting rules and counts the matches. | high |
-| `sun` | Sunrise/sunset (+offset) for each day in the window. | high |
-| `calendar` | Calls `calendar.get_events` for the window (+offset). | high |
-| `state` | Compares before vs. after, honouring `from`, `to`, `not_from`, `not_to` and `attribute`. | high; medium with `for:` |
-| `numeric_state` | Detects a crossing from outside the range to inside it. Supports `attribute`, `value_template` and entity thresholds. | high |
-| `template` | Compares the stored result before downtime with the result now. False → true is a miss, because HA never fires a template trigger that is already true at startup. | high |
-| `zone` | Enter/leave, based on the person/tracker state before and after. | medium |
-| `device`, new entity-style triggers | Reports any change in the referenced entity. | medium |
-| `event`, `webhook`, `mqtt`, `tag`, `conversation`, … | Listed as unverifiable. | – |
+| `time` (fixed, `input_datetime`, timestamp `sensor`, offset, `weekday`) | Computes every occurrence in the window, using the helper's value from **before** the downtime. | Confirmed |
+| `time_pattern` | Replicates HA's pattern and defaulting rules and counts the matches. | Confirmed |
+| `sun` | Sunrise/sunset (+offset) for each day in the window. | Confirmed |
+| `calendar` | Calls `calendar.get_events` for the window (+offset). | Confirmed |
+| `state` | Compares before vs. after, honouring `from`, `to`, `not_from`, `not_to` and `attribute`. | Confirmed; Probable with `for:` or when the change landed after startup; Possible with no baseline or an entity still `unavailable` |
+| `numeric_state` | Detects a crossing from outside the range to inside it. Supports `attribute`, `value_template` and entity thresholds. | Confirmed (Probable with `value_template`) |
+| `template` | Compares the stored result before downtime with the result now. False → true is a miss, because HA never fires a template trigger that is already true at startup. | Confirmed; Probable with `for:` |
+| `zone` | Enter/leave, based on the person/tracker state before and after. | Possible |
+| `device`, new entity-style triggers | Reports any change in the referenced entity. | Possible |
+| `event`, `webhook`, `mqtt`, `tag`, `conversation`, … | Anything sent while HA was down is lost, so it can't be reconstructed. Reported as Missed. | Unknown |
 | `homeassistant` start/shutdown | Ignored (they fire as part of the restart). | – |
+
+After an unclean stop, Confirmed becomes Probable (the window starts at the last heartbeat).
 
 Other details:
 
 - Blueprint automations are analysed with their inputs substituted.
-- Disabled triggers (`enabled: false`) are skipped.
-- Automations that were **off** before the downtime are skipped.
-- **Conditions are not evaluated.** A "missed" trigger might not have passed its conditions.
+- Disabled triggers (`enabled: false`) and disabled conditions are skipped.
+- Automations that were **off** before the downtime (or, for what-if, are off now) are skipped. They're counted in the report, not listed.
 
 Known blind spots:
 
 - A state that changed **and changed back** during the outage is invisible, because nothing was recorded while HA was down.
 - After an unclean stop, anything between the last heartbeat and the crash has a ±heartbeat margin of error.
+
+## Severity, confidence and conditions
+
+Every finding has three separate attributes. They use the same words everywhere: dashboard, Repairs, sensors, push and JSON.
+
+**Type: what happened**
+
+| Type | Meaning |
+|---|---|
+| Interrupted | Was mid-run when HA went down; the remaining steps never ran. |
+| Missed | A trigger should have fired while HA was down. |
+| Fired at startup | Fired in the settle window after boot; may be spurious (for example `unavailable → on`). |
+
+**Confidence: how sure it is that it happened** (never colored; shown as a 4-step meter)
+
+| Confidence | Used when |
+|---|---|
+| ●●●● Confirmed | Clean shutdown and deterministic evidence: a scheduled time inside the window, a transition recorded before and after, a trace showing the interrupted step. |
+| ●●●○ Probable | Strong evidence with a gap: unclean shutdown, a `for:` duration, a change that landed after startup. |
+| ●●○○ Possible | Weak evidence: no baseline, entity still `unavailable`, zone/device approximations. |
+| ●○○○ Unknown | Can't be reconstructed (event, webhook, MQTT, tag, conversation). |
+
+**Severity: how much it matters** (the only colored attribute; it decides Repairs and push)
+
+| Severity | Meaning |
+|---|---|
+| 🔴 Critical | Must know immediately. |
+| 🟠 High | Should review. |
+| 🟡 Medium | Default for automations you haven't rated. |
+| 🔵 Low | FYI. |
+| ⚪ None | No impact: the conditions would have failed, or you rated the automation None. Hidden by default. |
+
+### Rating your automations
+
+On first setup Downtime Auditor creates five labels: `downtime_auditor_sev: critical`, `… high`, `… medium`, `… low` and `… none`. Add one to an automation (or a script, for its Interrupted findings) in its settings, or pick a rating from a finding's details on the dashboard. If several are attached, the highest wins. Unlabelled automations are **Medium**.
+
+If you delete the labels they stay deleted. Recreate the missing ones with the **Create severity labels** button on the dashboard's Live status tab, or the `downtime_auditor.create_severity_labels` service.
+
+The rating is then adjusted per finding:
+
+- **Conditions would have failed** → None.
+- **Fired at startup**, or **Unknown confidence** → capped at Low.
+- **Critical is never capped**, except by failed conditions. A Critical automation with an event, webhook, MQTT, tag or conversation trigger therefore raises a Critical **Repair on every restart**, because a message could have been lost each time.
+
+Repairs, push and `binary_sensor.downtime_auditor_needs_attention` only consider findings at or above their minimum severity (see [Options](#options)).
+
+### Condition checks
+
+For Missed findings with Confirmed or Probable confidence, the automation's `conditions` are evaluated at each missed time. If any missed time passes, the result is *pass*; if all fail, *fail*; otherwise *unknown*.
+
+| Condition | After a real outage | What-if (past window) |
+|---|---|---|
+| `time` (`after`/`before`/`weekday`) | Exact, at the missed time | Exact |
+| `sun` | Exact, for that day | Exact |
+| `state`, `numeric_state` (incl. `attribute`, `for:`) | Value from just before the downtime | Recorder history at the missed time |
+| `zone` | Value from before the downtime, by zone name | Recorder history, by zone name |
+| `template` | Evaluated only if every entity it reads still has the same value; *unknown* if it uses `now()`, `trigger`, `this` or a whole domain | Same, against history |
+| `and` / `or` / `not` | Three-valued (pass/fail/unknown) | Same |
+| `trigger` (trigger id) | Exact | Exact |
+| `device` and anything else | Unknown | Unknown |
+
+Values from before a real outage are estimates: you might have changed something while HA was down. So a fail that depends on them is shown as **"probably failed"** and the finding keeps its normal severity; only a fail decided by exact checks (time, sun, trigger id, or recorder history in what-if) sets the severity to None.
 
 ## Installation
 
@@ -107,19 +170,18 @@ All entities belong to the **Downtime Auditor** device.
 
 | Entity | State | Attributes |
 |---|---|---|
-| `sensor.downtime_auditor_interrupted_automations` | count | `findings` (list), `window`, `report_generated`, `truncated` |
-| `sensor.downtime_auditor_missed_triggers` | count | same |
-| `sensor.downtime_auditor_possibly_missed_triggers` | count | same |
-| `sensor.downtime_auditor_fired_during_startup` | count | same |
-| `sensor.downtime_auditor_unverifiable_triggers` | count | same |
-| `sensor.downtime_auditor_last_downtime_duration` | duration | `clean_shutdown`, `counts`, `actionable`, HA version before/after, `json_path` |
+| `sensor.downtime_auditor_interrupted_automations` | findings with severity Low or higher | `findings` (list), `window`, `report_generated`, `truncated` |
+| `sensor.downtime_auditor_missed_triggers` | same | same |
+| `sensor.downtime_auditor_fired_at_startup` | same | same |
+| `sensor.downtime_auditor_highest_severity` | `critical` / `high` / `medium` / `low` / `none` | |
+| `sensor.downtime_auditor_last_downtime_duration` | duration | `clean_shutdown`, `counts`, `counts_by_severity`, `highest_severity`, `needs_attention`, `skipped`, HA version before/after, `json_path` (`actionable` is deprecated) |
 | `sensor.downtime_auditor_last_downtime_start` / `_end` | timestamp | |
 | `sensor.downtime_auditor_last_report` | timestamp | |
 | `sensor.downtime_auditor_last_heartbeat` (diagnostic, disabled by default) | timestamp | `tracking`, `running_now` |
-| `binary_sensor.downtime_auditor_needs_attention` | on if anything was interrupted/missed/possibly missed | |
+| `binary_sensor.downtime_auditor_needs_attention` | on if a finding is at or above *Minimum severity for Repairs* | |
 | `binary_sensor.downtime_auditor_last_shutdown_unclean` | on after a crash or power loss | |
 
-Each item in `findings` includes `name`, `entity_id`, `summary`, `confidence`, `platform`, the trigger id or index, and, where relevant, `count` and `first_due`. Up to 50 items are stored per sensor. The attribute is excluded from the recorder so it doesn't bloat your database.
+Each item in `findings` includes `name`, `entity_id`, `summary`, `severity`, `confidence`, `conditions`, `platform`, the trigger id or index, and, where relevant, `count` and `first_due`. All findings are listed (including severity None), most severe first, up to 50 per sensor. The attribute is excluded from the recorder so it doesn't bloat your database.
 
 Example Markdown card for your own dashboard:
 
@@ -128,8 +190,8 @@ type: markdown
 content: >
   {% set m = state_attr('sensor.downtime_auditor_missed_triggers', 'findings') or [] %}
   **Last downtime:** {{ states('sensor.downtime_auditor_last_downtime_duration') }} min
-  {% for f in m %}
-  - **{{ f.name }}** — {{ f.summary }}
+  {% for f in m if f.severity != 'none' %}
+  - **{{ f.severity | title }}** · {{ f.name }} — {{ f.summary }}
   {% endfor %}
 ```
 
@@ -138,18 +200,19 @@ content: >
 | Option | Default | Notes |
 |---|---|---|
 | Sidebar dashboard | on | Adds a *Downtime Auditor* entry to the sidebar (admins only). |
-| Create Repairs issues | on | One issue per interrupted automation or missed trigger. |
-| Repairs for "possibly missed" too | off | |
+| Create Repairs issues | on | One issue per finding at or above the minimum severity below. |
+| Minimum severity for Repairs | High | Also decides `needs_attention`. Installs upgraded from v0.4 start at Medium. |
 | Persistent notification | off | Posts the markdown report to the notification panel. |
 | Push notify service | blank | `notify.mobile_app_xxx`, or a script that accepts `title` and `message` variables. |
-| Push only when something was found | on | |
+| Minimum severity for push | High | Installs upgraded from v0.4 start at Medium. |
+| Push only when something was found | on | Skip the push when nothing reached the minimum severity for push. |
+| Show severity None in the dashboard | off | The dashboard also has its own toggle. |
 | Write JSON reports | on | Saves reports under `/config/downtime_auditor/`. The History tab needs this. |
-| Keep detailed reports for | 30 days | A full report is saved only when a downtime had something interrupted, missed, possibly missed or fired at startup. Older reports are deleted, with a hard cap of 500 files. |
+| Keep detailed reports for | 30 days | A full report is saved only when a downtime had a finding worth keeping (not severity None, and not just unconfirmable event-style triggers). Older reports are deleted, with a hard cap of 500 files. |
 | Keep history summary for | 365 days | One line per downtime (about 0.5 KB each), including restarts where nothing was found. |
 | Heartbeat interval | 60 s | Lower gives better crash accuracy but more disk writes. |
 | Startup settle delay | 90 s | Increase if Zigbee/Z-Wave/cloud entities take a while to come back. |
 | Track scripts | on | Report scripts that were interrupted. |
-| List unverifiable triggers | on | |
 | Maximum window | 14 d | Caps the analysis after a very long outage. |
 
 ## History and retention
@@ -158,11 +221,11 @@ Every downtime gets its own entry, including restarts in quick succession, so yo
 
 | File | Contents | Kept for |
 |---|---|---|
-| `history.jsonl` | One summary line per downtime: window, clean or unclean, counts | 365 days (configurable) |
+| `history.jsonl` | One summary line per downtime: window, clean or unclean, counts by type and severity | 365 days (configurable) |
 | `reports/report-*.json` | Full report, only for downtimes where something was found | 30 days (configurable), max 500 files |
 | `last_report.json` | The most recent report, whatever it found | Always overwritten |
 
-A clean restart where nothing was missed or interrupted only adds a summary line, so a busy day of config reloads won't push older, more useful reports out. In the History tab, entries without a saved report show **nothing found**, and entries past the retention period show **expired**.
+A clean restart where nothing worth keeping was found only adds a summary line, so a busy day of config reloads won't push older, more useful reports out. In the History tab, entries without a saved report show **nothing found**, and entries past the retention period show **expired**. Entries recorded by v0.4 are shown in the new terms and marked **v0.4**; their severity column shows "—". Old files are never rewritten.
 
 ## Services
 
@@ -170,22 +233,53 @@ A clean restart where nothing was missed or interrupted only adds a summary line
 - `downtime_auditor.resend_last_report` shows the last report again and re-sends the push.
 - `downtime_auditor.snapshot_now` forces a snapshot and returns what's currently running. Useful for debugging.
 - `downtime_auditor.dismiss_repairs` removes every Repairs issue raised by the latest report.
+- `downtime_auditor.create_severity_labels` creates any missing `downtime_auditor_sev:` labels and returns the names it created.
 
 ## Event
 
-After every analysis it fires `downtime_auditor_report` with `window`, `counts`, `actionable` and `json_path`. You can use it to build your own follow-ups:
+After every analysis it fires `downtime_auditor_report` with:
+
+| Key | Contents |
+|---|---|
+| `window` | start/end, duration, clean shutdown |
+| `counts` | per type: `interrupted`, `missed`, `fired_at_startup` |
+| `counts_by_severity` | `critical`, `high`, `medium`, `low`, `none` |
+| `highest_severity` | the most severe finding, or `null` if there were none |
+| `needs_attention` | number of findings at or above *Minimum severity for Repairs* |
+| `skipped` | automations not checked because they were off |
+| `json_path` | the saved report file, if any |
+| `actionable` | **deprecated**, same value as `needs_attention`; removed in v0.6.0 |
+
+You can use it to build your own follow-ups:
 
 ```yaml
 triggers:
   - trigger: event
     event_type: downtime_auditor_report
 conditions:
-  - "{{ trigger.event.data.counts.interrupted | default(0) > 0 }}"
+  - "{{ trigger.event.data.highest_severity in ['critical', 'high'] }}"
 actions:
   - action: notify.mobile_app_phone
     data:
-      message: "{{ trigger.event.data.counts.interrupted }} automation(s) were interrupted by the restart"
+      message: "{{ trigger.event.data.needs_attention }} important finding(s) after the restart"
 ```
+
+## Upgrading from v0.4
+
+v0.5 is migrated automatically on the first start, but a few things changed:
+
+| v0.4 | v0.5 |
+|---|---|
+| `sensor.downtime_auditor_possibly_missed_triggers` | **removed**: now Missed findings with Possible confidence |
+| `sensor.downtime_auditor_unverifiable_triggers` | **removed**: now Missed findings with Unknown confidence |
+| `sensor.downtime_auditor_fired_during_startup` | `sensor.downtime_auditor_fired_at_startup`, renamed in place (history kept). Only a default ID is renamed; a custom ID stays. |
+| — | `sensor.downtime_auditor_highest_severity` (new) |
+| Options *Repairs for "possibly missed" too* and *List unverifiable triggers* | removed (replaced by the minimum severity options and the dashboard filters) |
+| `needs_attention` on for any interrupted/missed/possibly missed finding | on for findings at or above *Minimum severity for Repairs* (set to Medium on upgrade, so it behaves as before until you raise it) |
+| Event key `actionable` | deprecated alias of `needs_attention`; removed in v0.6.0 |
+| Event `counts` keys `possibly_missed`, `unverifiable`, `skipped`, `fired_during_startup` | `missed` (includes the first two), `skipped` moved to its own key, `fired_at_startup` |
+
+The **Missed** count is usually higher than in v0.4, because event-style and possibly-missed findings are now included. Long-term statistics for the two removed sensors stay until you delete them in **Developer tools → Statistics**. Downgrading to v0.4 afterwards isn't supported.
 
 ## Compatibility
 
@@ -197,20 +291,22 @@ The integration reads two internal Home Assistant structures (automation trigger
 
 ## Development
 
+Tests need Python 3.13 (on Windows, run them in WSL; Home Assistant doesn't support native Windows):
+
 ```bash
+python3.13 -m venv .venv && . .venv/bin/activate
 pip install pytest-homeassistant-custom-component
 pytest
 ```
 
 The tests run a real HA core. They cover:
 
-- a full shutdown → outage → boot cycle
-- a crash/heartbeat cycle
-- the real `homeassistant_started` boot path and a real `async_stop` with a run in progress
-- entities, Repairs issues and their replacement
-- every websocket command, including path-traversal rejection
-- sidebar panel registration and removal
-- the what-if service and the config flow
+- a full shutdown → outage → boot cycle, a crash/heartbeat cycle, and the real `homeassistant_started` boot path and `async_stop` with a run in progress
+- the complete upgrade from v0.4 (config entry, entities, store, Repairs and history files)
+- severity rules, labels (created once, rated per automation, set from the dashboard) and the Repairs/push thresholds
+- condition checks against the baseline and against recorder history
+- entities, Repairs issues and their replacement, every websocket command (including path-traversal rejection)
+- sidebar panel registration and removal, the what-if service and the config flow
 
 The dashboard is a plain web component (`frontend/panel.js`, no build step) that talks to the `downtime_auditor/*` websocket commands.
 

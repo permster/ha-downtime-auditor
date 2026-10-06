@@ -22,5 +22,21 @@ jobs:
          git commit -am "Release v${{ steps.v.outputs.new }}"
          git tag "v${{ steps.v.outputs.new }}"
          git push origin main "v${{ steps.v.outputs.new }}"
-     - env: { GH_TOKEN: "${{ github.token }}" }
-       run: gh release create "v${{ steps.v.outputs.new }}" --generate-notes ${{ inputs.prerelease && '--prerelease' || '' }}
+     # Curated notes from docs/release-notes/<version>.md (a beta like 0.5.0b1 falls back to 0.5.0.md)
+     # go on top; GitHub's generated commit list follows. Without a notes file, only the generated list.
+     - env:
+         GH_TOKEN: "${{ github.token }}"
+         VERSION: "${{ steps.v.outputs.new }}"
+         PRERELEASE: "${{ inputs.prerelease && '--prerelease' || '' }}"
+       run: |
+         notes=""
+         for f in "docs/release-notes/${VERSION}.md" "docs/release-notes/${VERSION%%b*}.md"; do
+           if [ -f "$f" ]; then notes="$f"; break; fi
+         done
+         if [ -n "$notes" ]; then
+           echo "Using release notes from $notes"
+           gh release create "v${VERSION}" --generate-notes --notes "$(cat "$notes")" $PRERELEASE
+         else
+           echo "No docs/release-notes/${VERSION}.md; using generated notes only"
+           gh release create "v${VERSION}" --generate-notes $PRERELEASE
+         fi

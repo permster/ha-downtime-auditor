@@ -7,33 +7,35 @@
         "data": {
           "sidebar_panel": "Sidebar dashboard",
           "repairs": "Create Repairs issues",
-          "repairs_possible": "Repairs for 'possibly missed' too",
+          "repairs_min_severity": "Minimum severity for Repairs",
           "persistent_notification": "Persistent notification",
           "notify_service": "Push notify service (optional)",
+          "push_min_severity": "Minimum severity for push",
           "push_only_on_findings": "Push only when something was found",
+          "show_severity_none": "Show severity None in the dashboard",
           "write_json": "Write JSON reports",
           "report_retention_days": "Keep detailed reports for",
           "history_retention_days": "Keep history summary for",
           "heartbeat_interval": "Heartbeat interval",
           "startup_delay": "Startup settle delay",
           "include_scripts": "Track scripts",
-          "include_unverifiable": "List unverifiable triggers",
           "max_window_days": "Maximum window"
         },
         "data_description": {
           "sidebar_panel": "Add a Downtime Auditor dashboard to the sidebar (admins only).",
-          "repairs": "Raise an issue in Settings \u2192 Repairs for every interrupted automation and missed trigger.",
-          "repairs_possible": "Also raise Repairs issues for lower-confidence findings.",
+          "repairs": "Raise an issue in Settings \u2192 Repairs for findings at or above the minimum severity below.",
+          "repairs_min_severity": "Only findings at this severity or higher raise a Repairs issue and turn on Needs attention.",
           "persistent_notification": "Also post the full report to the notification panel (off by default; the dashboard replaces it).",
           "notify_service": "e.g. notify.mobile_app_pixel_8 or script.notify_send_message_to_phone (receives title + message). Leave blank to disable.",
-          "push_only_on_findings": "Skip the phone push when nothing was missed or interrupted.",
+          "push_min_severity": "Only findings at this severity or higher trigger the phone push.",
+          "push_only_on_findings": "Skip the phone push when nothing reached the minimum severity for push.",
+          "show_severity_none": "Findings with no impact (conditions would have failed, or rated None) are hidden by default.",
           "write_json": "Save reports under /config/downtime_auditor/ for the dashboard's History tab.",
           "report_retention_days": "Full reports are saved only for downtimes where something was found, and deleted after this many days (hard cap of 500 files).",
           "history_retention_days": "A one-line summary of every downtime, used by the History tab. Each line is about 0.5 KB.",
           "heartbeat_interval": "How often state is snapshotted to disk. Sets the accuracy of the window start after a crash or power loss.",
           "startup_delay": "Wait this long after HA has started before analysing, so integrations can restore their real states.",
           "include_scripts": "Also report scripts that were running when HA went down.",
-          "include_unverifiable": "List event/webhook/MQTT-style triggers whose missed firings can't be reconstructed.",
           "max_window_days": "Cap on how far back to look after a long outage."
         }
       }
@@ -53,33 +55,35 @@
         "data": {
           "sidebar_panel": "Sidebar dashboard",
           "repairs": "Create Repairs issues",
-          "repairs_possible": "Repairs for 'possibly missed' too",
+          "repairs_min_severity": "Minimum severity for Repairs",
           "persistent_notification": "Persistent notification",
           "notify_service": "Push notify service (optional)",
+          "push_min_severity": "Minimum severity for push",
           "push_only_on_findings": "Push only when something was found",
+          "show_severity_none": "Show severity None in the dashboard",
           "write_json": "Write JSON reports",
           "report_retention_days": "Keep detailed reports for",
           "history_retention_days": "Keep history summary for",
           "heartbeat_interval": "Heartbeat interval",
           "startup_delay": "Startup settle delay",
           "include_scripts": "Track scripts",
-          "include_unverifiable": "List unverifiable triggers",
           "max_window_days": "Maximum window"
         },
         "data_description": {
           "sidebar_panel": "Add a Downtime Auditor dashboard to the sidebar (admins only).",
-          "repairs": "Raise an issue in Settings \u2192 Repairs for every interrupted automation and missed trigger.",
-          "repairs_possible": "Also raise Repairs issues for lower-confidence findings.",
+          "repairs": "Raise an issue in Settings \u2192 Repairs for findings at or above the minimum severity below.",
+          "repairs_min_severity": "Only findings at this severity or higher raise a Repairs issue and turn on Needs attention.",
           "persistent_notification": "Also post the full report to the notification panel (off by default; the dashboard replaces it).",
           "notify_service": "e.g. notify.mobile_app_pixel_8 or script.notify_send_message_to_phone (receives title + message). Leave blank to disable.",
-          "push_only_on_findings": "Skip the phone push when nothing was missed or interrupted.",
+          "push_min_severity": "Only findings at this severity or higher trigger the phone push.",
+          "push_only_on_findings": "Skip the phone push when nothing reached the minimum severity for push.",
+          "show_severity_none": "Findings with no impact (conditions would have failed, or rated None) are hidden by default.",
           "write_json": "Save reports under /config/downtime_auditor/ for the dashboard's History tab.",
           "report_retention_days": "Full reports are saved only for downtimes where something was found, and deleted after this many days (hard cap of 500 files).",
           "history_retention_days": "A one-line summary of every downtime, used by the History tab. Each line is about 0.5 KB.",
           "heartbeat_interval": "How often state is snapshotted to disk. Sets the accuracy of the window start after a crash or power loss.",
           "startup_delay": "Wait this long after HA has started before analysing, so integrations can restore their real states.",
           "include_scripts": "Also report scripts that were running when HA went down.",
-          "include_unverifiable": "List event/webhook/MQTT-style triggers whose missed firings can't be reconstructed.",
           "max_window_days": "Cap on how far back to look after a long outage."
         }
       }
@@ -118,21 +122,47 @@
     "dismiss_repairs": {
       "name": "Dismiss repairs",
       "description": "Remove all Repairs issues raised by the latest report."
+    },
+    "create_severity_labels": {
+      "name": "Create severity labels",
+      "description": "Create any missing downtime_auditor_sev labels (Critical, High, Medium, Low, None). Existing labels are left unchanged."
     }
   },
   "issues": {
     "interrupted": {
       "title": "Interrupted by downtime: {name}",
-      "description": "`{entity_id}` was running when Home Assistant went down and did not finish.\n\n**{summary}**\n\nDowntime: {window}\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+      "description": "`{entity_id}` was running when Home Assistant went down and did not finish.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
     },
     "missed": {
       "title": "Missed during downtime: {name}",
-      "description": "`{entity_id}` had a trigger that should have fired while Home Assistant was down.\n\n**{summary}**\n\nDowntime: {window}\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+      "description": "`{entity_id}` had a trigger that should have fired while Home Assistant was down.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
     },
-    "possibly_missed": {
-      "title": "Possibly missed during downtime: {name}",
-      "description": "`{entity_id}` may have missed a trigger while Home Assistant was down.\n\n**{summary}**\n\nDowntime: {window}\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+    "fired_at_startup": {
+      "title": "Fired at startup: {name}",
+      "description": "`{entity_id}` fired in the settle window right after Home Assistant started. Check it wasn't a spurious trigger (for example `unavailable \u2192 on`).\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
     }
   },
-  "entity": {}
+  "entity": {
+    "sensor": {
+      "highest_severity": {
+        "state": {
+          "critical": "Critical",
+          "high": "High",
+          "medium": "Medium",
+          "low": "Low",
+          "none": "None"
+        }
+      }
+    }
+  },
+  "selector": {
+    "severity": {
+      "options": {
+        "critical": "Critical",
+        "high": "High",
+        "medium": "Medium",
+        "low": "Low"
+      }
+    }
+  }
 }

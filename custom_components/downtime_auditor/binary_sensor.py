@@ -10,8 +10,9 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, SIGNAL_REPORT_UPDATED
+from .const import CONF_REPAIRS_MIN_SEVERITY, DOMAIN, SIGNAL_REPORT_UPDATED, Severity
 from .sensor import device_info
+from .severity import at_least
 
 
 async def async_setup_entry(
@@ -42,7 +43,7 @@ class _Base(BinarySensorEntity):
 
 
 class NeedsAttention(_Base):
-    """On when the last report has interrupted/missed/possibly-missed findings."""
+    """On when the last report has a finding at or above the Repairs severity threshold."""
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
 
@@ -52,7 +53,13 @@ class NeedsAttention(_Base):
     @property
     def is_on(self) -> bool | None:
         rep = self.auditor.last_report
-        return None if rep is None else rep.get("actionable", 0) > 0
+        if rep is None:
+            return None
+        minimum = self.auditor.opt(CONF_REPAIRS_MIN_SEVERITY)
+        return any(
+            f.get("severity") != Severity.NONE and at_least(f.get("severity"), minimum)
+            for f in rep.get("findings") or []
+        )
 
 
 class UncleanShutdown(_Base):

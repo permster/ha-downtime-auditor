@@ -1,22 +1,39 @@
 /* Downtime Auditor sidebar dashboard. Plain web component, no build step. */
 
-const CATS = [
-  { key: "interrupted", label: "Interrupted", icon: "mdi:motion-pause-outline", color: "var(--da-red)" },
-  { key: "missed", label: "Missed", icon: "mdi:calendar-remove-outline", color: "var(--da-orange)" },
-  { key: "possibly_missed", label: "Possibly missed", icon: "mdi:help-circle-outline", color: "var(--da-amber)" },
-  { key: "fired_during_startup", label: "Fired at startup", icon: "mdi:rocket-launch-outline", color: "var(--da-blue)" },
-  { key: "unverifiable", label: "Unverifiable", icon: "mdi:eye-off-outline", color: "var(--da-grey)" },
+// Terminology mirrors const.py: type (what happened), confidence (how sure; never
+// colored), severity (how much it matters; the only colored attribute).
+const TYPES = [
+  { key: "interrupted", label: "Interrupted", icon: "mdi:motion-pause-outline" },
+  { key: "missed", label: "Missed", icon: "mdi:calendar-remove-outline" },
+  { key: "fired_at_startup", label: "Fired at startup", icon: "mdi:rocket-launch-outline" },
 ];
-const CAT = Object.fromEntries(CATS.map((c) => [c.key, c]));
+const TYPE = Object.fromEntries(TYPES.map((t) => [t.key, t]));
+const SEVERITIES = [
+  { key: "critical", label: "Critical", color: "var(--da-sev-critical)", rank: 4 },
+  { key: "high", label: "High", color: "var(--da-sev-high)", rank: 3 },
+  { key: "medium", label: "Medium", color: "var(--da-sev-medium)", rank: 2 },
+  { key: "low", label: "Low", color: "var(--da-sev-low)", rank: 1 },
+  { key: "none", label: "None", color: "var(--da-sev-none)", rank: 0 },
+];
+const SEV = Object.fromEntries(SEVERITIES.map((s) => [s.key, s]));
+const CONFIDENCES = [
+  { key: "confirmed", label: "Confirmed", level: 4 },
+  { key: "probable", label: "Probable", level: 3 },
+  { key: "possible", label: "Possible", level: 2 },
+  { key: "unknown", label: "Unknown", level: 1 },
+];
+const CONF = Object.fromEntries(CONFIDENCES.map((c) => [c.key, c]));
 const TABS = [
   { key: "report", label: "Last report", icon: "mdi:clipboard-text-clock-outline" },
   { key: "history", label: "History", icon: "mdi:history" },
   { key: "live", label: "Live status", icon: "mdi:heart-pulse" },
   { key: "whatif", label: "What-if", icon: "mdi:flask-outline" },
 ];
+const SOURCE_TEXT = { label: "set by label", default: "unrated (default)" };
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const rank = (s) => SEV[s]?.rank ?? -1;
 
 function fmtDur(sec) {
   sec = Math.max(0, Math.round(Number(sec) || 0));
@@ -37,20 +54,45 @@ function fmtAgo(iso) {
 // "2026-09-29 06:30:00" (HA local strings in findings) -> Date
 const parseLocal = (s) => (s ? new Date(String(s).replace(" ", "T")) : null);
 
+// ------------------------------------------------------------------ panel state
+// HA re-creates the panel element when you come back from the automation editor,
+// so state lives at module level and is mirrored to sessionStorage (per browser tab).
+const STORE_KEY = "downtime_auditor_panel_v1";
+const DEFAULT_STATE = () => ({
+  tab: "report",
+  types: TYPES.map((t) => t.key),
+  minSeverity: "all",
+  confidences: CONFIDENCES.map((c) => c.key),
+  showNone: null, // null = follow the integration option
+  search: "",
+  open: [],
+  viewingFile: null,
+  wiStart: null,
+  wiEnd: null,
+  whatif: null,
+});
+function loadState() {
+  let saved = null;
+  try { saved = JSON.parse(window.sessionStorage.getItem(STORE_KEY) || "null"); } catch (e) { /* private mode etc. */ }
+  return { ...DEFAULT_STATE(), ...(saved && typeof saved === "object" ? saved : {}) };
+}
+const STATE = loadState();
+function saveState() {
+  try { window.sessionStorage.setItem(STORE_KEY, JSON.stringify(STATE)); } catch (e) {
+    // Quota (large what-if results): keep everything but the results.
+    try { window.sessionStorage.setItem(STORE_KEY, JSON.stringify({ ...STATE, whatif: null })); } catch (e2) { /* ignore */ }
+  }
+}
+
 class DowntimeAuditorPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._tab = "report";
-    this._filter = new Set(["interrupted", "missed", "possibly_missed", "fired_during_startup"]);
-    this._search = "";
-    this._open = new Set();
     this._report = null;
-    this._viewingFile = null;
     this._history = null;
     this._status = null;
-    this._whatif = null;
     this._error = null;
+    this._notice = null;
     this._loaded = false;
   }
 
@@ -75,15 +117,17 @@ class DowntimeAuditorPanel extends HTMLElement {
 
   async _init() {
     this._render();
-    await this._loadReport();
+    this._loadStatus(false);
+    await this._loadReport(STATE.viewingFile || undefined);
+    if (STATE.tab === "history") this._loadHistory();
     try {
       this._unsub = await this._hass.connection.subscribeEvents(() => {
-        if (!this._viewingFile) this._loadReport();
+        if (!STATE.viewingFile) this._loadReport();
         this._history = null;
-        if (this._tab === "history") this._loadHistory();
+        if (STATE.tab === "history") this._loadHistory();
       }, "downtime_auditor_report");
     } catch (e) { /* non-admin or older HA */ }
-    this._tick = setInterval(() => { if (this._tab === "live") this._loadStatus(); }, 10000);
+    this._tick = setInterval(() => { if (STATE.tab === "live") this._loadStatus(); }, 10000);
   }
 
   disconnectedCallback() {
@@ -91,6 +135,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     if (this._unsub) this._unsub();
     clearInterval(this._tick);
     this._unsub = null;
+    saveState();
   }
   connectedCallback() {
     if (this._hass && !this._unsub && this._loaded) this._init();
@@ -107,9 +152,10 @@ class DowntimeAuditorPanel extends HTMLElement {
   async _loadReport(file) {
     try {
       this._report = await this._ws("report", file ? { file } : {});
-      this._viewingFile = file || null;
+      STATE.viewingFile = file || null;
       this._error = null;
     } catch (e) {
+      if (file) { STATE.viewingFile = null; return this._loadReport(); } // file expired since
       this._error = e.message || String(e);
     }
     this._loaded = true;
@@ -119,13 +165,13 @@ class DowntimeAuditorPanel extends HTMLElement {
     try { this._history = await this._ws("history", { limit: 500 }); } catch (e) { this._error = e.message; }
     this._render();
   }
-  async _loadStatus() {
+  async _loadStatus(render = true) {
     try { this._status = await this._ws("status"); } catch (e) { this._error = e.message; }
-    this._render();
+    if (render || this._loaded) this._render();
   }
 
   _setTab(t) {
-    this._tab = t;
+    STATE.tab = t;
     if (t === "history" && !this._history) this._loadHistory();
     if (t === "live") this._loadStatus();
     this._render();
@@ -137,6 +183,10 @@ class DowntimeAuditorPanel extends HTMLElement {
   }
   _moreInfo(entityId) {
     this.dispatchEvent(new CustomEvent("hass-more-info", { detail: { entityId }, bubbles: true, composed: true }));
+  }
+
+  _showNone() {
+    return STATE.showNone ?? Boolean(this._status?.show_severity_none);
   }
 
   // ---------------------------------------------------------------- render
@@ -151,24 +201,42 @@ class DowntimeAuditorPanel extends HTMLElement {
         <button class="icon-btn" data-act="refresh" title="Refresh"><ha-icon icon="mdi:refresh"></ha-icon></button>
       </div>
       <div class="tabs" role="tablist">
-        ${TABS.map((t) => `<button role="tab" class="tab ${this._tab === t.key ? "active" : ""}" data-tab="${t.key}">
+        ${TABS.map((t) => `<button role="tab" class="tab ${STATE.tab === t.key ? "active" : ""}" data-tab="${t.key}">
           <ha-icon icon="${t.icon}"></ha-icon><span>${t.label}</span></button>`).join("")}
       </div>
-      <div class="content">${this._error ? `<div class="banner err">${esc(this._error)}</div>` : ""}${this._body()}</div>`;
+      <div class="content">${this._error ? `<div class="banner err">${esc(this._error)}</div>` : ""}${
+        this._notice ? `<div class="banner">${esc(this._notice)}</div>` : ""}${this._body()}</div>`;
     const mb = r.querySelector("ha-menu-button");
     if (mb) { mb.hass = this._hass; mb.narrow = this._narrow; }
-    r.querySelector(".content").scrollTop = scrollY;
+    const content = r.querySelector(".content");
+    if (content) content.scrollTop = scrollY;
     this._bind();
+    saveState();
   }
 
   _body() {
     if (!this._loaded) return `<div class="empty">Loading…</div>`;
-    switch (this._tab) {
+    switch (STATE.tab) {
       case "history": return this._historyView();
       case "live": return this._liveView();
       case "whatif": return this._whatIfView();
-      default: return this._reportView(this._report, { viewingFile: this._viewingFile });
+      default: return this._reportView(this._report, { viewingFile: STATE.viewingFile });
     }
+  }
+
+  _visible(f) {
+    if (!STATE.types.includes(f.type)) return false;
+    if (!STATE.confidences.includes(f.confidence)) return false;
+    if (f.severity === "none") return this._showNone();
+    if (STATE.minSeverity !== "all" && rank(f.severity) < rank(STATE.minSeverity)) return false;
+    return this._matches(f);
+  }
+
+  _matches(f) {
+    if (!STATE.search) return true;
+    const q = STATE.search.toLowerCase();
+    return [f.name, f.entity_id, f.summary, f.platform, f.trigger_id, f.severity, f.confidence]
+      .some((v) => String(v ?? "").toLowerCase().includes(q));
   }
 
   _reportView(rep, { viewingFile = null, whatIf = false } = {}) {
@@ -180,15 +248,19 @@ class DowntimeAuditorPanel extends HTMLElement {
         of Home Assistant. Try the <a href="#" data-tab="whatif">What-if</a> tab in the meantime.</p></div>`;
     }
     const w = rep.window, meta = rep.meta || {}, counts = rep.counts || {};
-    const findings = (rep.findings || []).filter((f) => f.category !== "skipped");
-    const skipped = (rep.findings || []).filter((f) => f.category === "skipped").length;
-    const shown = findings.filter((f) => this._filter.has(f.category) && this._matches(f));
+    const findings = rep.findings || [];
+    const shown = findings.filter((f) => this._visible(f));
+    const noneCount = findings.filter((f) => f.severity === "none").length;
+    const skipped = rep.skipped ?? meta.automations_skipped ?? 0;
     const verBump = meta.ha_version_before && meta.ha_version_before !== meta.ha_version_after;
+    const top = rep.highest_severity;
 
     return `
       ${viewingFile ? `<div class="banner">Viewing an older report from ${esc(fmtTime(rep.generated_at))}.
         <a href="#" data-act="latest">Back to latest</a></div>` : ""}
-      ${whatIf ? `<div class="banner">What-if simulation — only time, time-pattern, sun and calendar triggers are evaluated.</div>` : ""}
+      ${rep.legacy ? `<div class="banner">Recorded by v0.4, before severity ratings existed: severities are defaults.</div>` : ""}
+      ${whatIf ? `<div class="banner">What-if simulation — only time, time-pattern, sun and calendar triggers are evaluated.
+        ${meta.conditions_basis === "none" ? " Conditions weren't checked: the recorder isn't available." : " Conditions are checked against recorder history."}</div>` : ""}
       <div class="card hero">
         <div class="hero-main">
           <div class="label">${whatIf ? "Simulated window" : "Last downtime"}</div>
@@ -196,6 +268,7 @@ class DowntimeAuditorPanel extends HTMLElement {
           <div class="range">${esc(fmtTime(w.start))} <span class="arrow">→</span> ${esc(fmtTime(w.end))}</div>
         </div>
         <div class="hero-side">
+          ${top ? `<span class="sev-badge lg" style="--s:${SEV[top]?.color}">Highest severity: ${esc(SEV[top]?.label || top)}</span>` : ""}
           ${whatIf ? "" : `<span class="chip ${w.clean_shutdown ? "ok" : "bad"}">
             <ha-icon icon="${w.clean_shutdown ? "mdi:check-circle-outline" : "mdi:flash-alert-outline"}"></ha-icon>
             ${w.clean_shutdown ? "Clean shutdown" : "Unclean stop"}</span>`}
@@ -211,25 +284,52 @@ class DowntimeAuditorPanel extends HTMLElement {
       </div>
 
       <div class="tiles">
-        ${CATS.map((c) => `<button class="tile ${this._filter.has(c.key) ? "on" : ""}" data-filter="${c.key}" style="--c:${c.color}">
-          <ha-icon icon="${c.icon}"></ha-icon>
-          <div class="n">${counts[c.key] || 0}</div><div class="l">${c.label}</div></button>`).join("")}
+        ${TYPES.map((t) => `<button class="tile ${STATE.types.includes(t.key) ? "on" : ""}" data-type="${t.key}" aria-pressed="${STATE.types.includes(t.key)}">
+          <ha-icon icon="${t.icon}"></ha-icon>
+          <div class="n">${counts[t.key] || 0}</div><div class="l">${t.label}</div></button>`).join("")}
       </div>
 
-      ${this._timeline(rep, findings)}
+      ${this._timeline(rep, shown)}
 
       <div class="card">
         <div class="list-head">
           <h3>Findings <span class="muted">(${shown.length} of ${findings.length})</span></h3>
-          <input class="search" type="search" placeholder="Search name, entity, summary…" value="${esc(this._search)}">
+          <input class="search" type="search" placeholder="Search name, entity, summary…" value="${esc(STATE.search)}">
         </div>
+        ${this._filterBar(noneCount)}
         ${!findings.length ? `<div class="all-good"><ha-icon icon="mdi:shield-check-outline"></ha-icon>
             Nothing was missed or interrupted${whatIf ? " in this window" : ""}.</div>` : ""}
-        ${shown.map((f, i) => this._row(f, `${rep.generated_at}|${i}|${f.entity_id}|${f.trigger_index}|${f.category}`)).join("")}
+        ${shown.map((f) => this._row(f, this._key(rep, f), { canRate: !rep.legacy })).join("")}
         ${findings.length && !shown.length ? `<div class="empty">No findings match the current filter.</div>` : ""}
-        ${skipped ? `<div class="foot muted">${skipped} automation(s) were off before the downtime and were skipped.</div>` : ""}
-        <div class="foot muted">Conditions are not evaluated — a missed trigger may not have passed its conditions.</div>
+        ${skipped ? `<div class="foot muted">${esc(skipped)} automation(s) were turned off and were skipped.</div>` : ""}
+        ${whatIf ? `<div class="foot muted">What-if results are kept while this browser tab is open.</div>` : ""}
       </div>`;
+  }
+
+  _key(rep, f) {
+    return [rep.generated_at, f.type, f.entity_id, f.trigger_index, f.platform, (f.summary || "").slice(0, 40)].join("|");
+  }
+
+  _filterBar(noneCount) {
+    const showNone = this._showNone();
+    return `<div class="filters">
+      <label class="fl">Minimum severity
+        <select data-act="min-severity">
+          <option value="all" ${STATE.minSeverity === "all" ? "selected" : ""}>All</option>
+          ${SEVERITIES.filter((s) => s.key !== "none").map((s) => `<option value="${s.key}" ${STATE.minSeverity === s.key ? "selected" : ""}>${s.label}${s.key === "critical" ? "" : " and up"}</option>`).join("")}
+        </select>
+      </label>
+      <div class="fl">Confidence
+        <div class="chips">${CONFIDENCES.map((c) => `<button class="chip-btn sm ${STATE.confidences.includes(c.key) ? "on" : ""}" data-conf="${c.key}" aria-pressed="${STATE.confidences.includes(c.key)}">${this._meter(c.key)} ${c.label}</button>`).join("")}</div>
+      </div>
+      <label class="fl toggle"><input type="checkbox" data-act="show-none" ${showNone ? "checked" : ""}>
+        Show severity None <span class="muted">(${noneCount})</span></label>
+    </div>`;
+  }
+
+  _meter(conf) {
+    const lvl = CONF[conf]?.level ?? 0;
+    return `<span class="meter" aria-hidden="true">${[1, 2, 3, 4].map((i) => `<i class="${i <= lvl ? "f" : ""}"></i>`).join("")}</span>`;
   }
 
   _chartWidth() {
@@ -238,34 +338,31 @@ class DowntimeAuditorPanel extends HTMLElement {
     return Math.max(280, Math.min(1134, w));
   }
 
-  _matches(f) {
-    if (!this._search) return true;
-    const q = this._search.toLowerCase();
-    return [f.name, f.entity_id, f.summary, f.platform, f.trigger_id].some((v) => String(v ?? "").toLowerCase().includes(q));
-  }
-
   _timeline(rep, findings) {
     const w = rep.window;
     const t0 = new Date(w.start).getTime(), t1 = new Date(w.end).getTime();
     if (!(t1 > t0)) return "";
     const W = this._chartWidth(), H = 96, pad = 24, x = (t) => pad + ((t - t0) / (t1 - t0)) * (W - 2 * pad);
-    const lanes = { interrupted: 22, missed: 44, possibly_missed: 60, fired_during_startup: 76 };
+    const lanes = { interrupted: 24, missed: 46, fired_at_startup: 66 };
     const marks = [];
     for (const f of findings) {
-      if (f.category === "interrupted") {
-        marks.push(`<g><title>${esc(f.name)} — interrupted</title><rect x="${x(t0) - 5}" y="${lanes.interrupted - 5}" width="10" height="10" transform="rotate(45 ${x(t0)} ${lanes.interrupted})" fill="var(--da-red)"/></g>`);
-      } else if ((f.category === "missed" || f.category === "possibly_missed") && f.occurrences?.length) {
-        const y = lanes[f.category];
+      const color = SEV[f.severity]?.color || "var(--da-sev-none)";
+      const y = lanes[f.type] ?? 46;
+      if (f.type === "interrupted") {
+        marks.push(`<g><title>${esc(f.name)} — interrupted · ${esc(SEV[f.severity]?.label)}</title><rect x="${x(t0) - 5}" y="${y - 5}" width="10" height="10" transform="rotate(45 ${x(t0)} ${y})" fill="${color}"/></g>`);
+      } else if (f.type === "fired_at_startup") {
+        marks.push(`<g><title>${esc(f.name)} — fired at startup</title><circle cx="${x(t1)}" cy="${y}" r="4" fill="none" stroke="${color}" stroke-width="2"/></g>`);
+      } else if (f.occurrences?.length) {
         const occ = f.occurrences_iso?.length ? f.occurrences_iso : f.occurrences;
         for (const o of occ.slice(0, 200)) {
           const d = f.occurrences_iso?.length ? new Date(o) : parseLocal(o);
           if (!d) continue;
           const t = d.getTime();
           if (t < t0 - 1000 || t > t1 + 1000) continue;
-          marks.push(`<circle cx="${x(t)}" cy="${y}" r="4.5" fill="${CAT[f.category].color}"><title>${esc(f.name)} — due ${esc(fmtTime(d.toISOString()))}</title></circle>`);
+          marks.push(`<circle cx="${x(t)}" cy="${y}" r="4.5" fill="${color}"><title>${esc(f.name)} — due ${esc(fmtTime(d.toISOString()))} · ${esc(SEV[f.severity]?.label)}</title></circle>`);
         }
-      } else if (f.category === "missed" || f.category === "possibly_missed") {
-        marks.push(`<g><title>${esc(f.name)} — changed during downtime</title><line x1="${x(t1) - 3}" x2="${x(t1) + 3}" y1="${lanes[f.category] - 5}" y2="${lanes[f.category] + 5}" stroke="${CAT[f.category].color}" stroke-width="3"/></g>`);
+      } else {
+        marks.push(`<g><title>${esc(f.name)} — changed during downtime · ${esc(SEV[f.severity]?.label)}</title><line x1="${x(t1) - 3}" x2="${x(t1) + 3}" y1="${y - 5}" y2="${y + 5}" stroke="${color}" stroke-width="3"/></g>`);
       }
     }
     const ticks = [];
@@ -275,7 +372,7 @@ class DowntimeAuditorPanel extends HTMLElement {
       ticks.push(`<text x="${x(t)}" y="${H - 2}" text-anchor="${i === 0 ? "start" : i === n ? "end" : "middle"}">${esc(fmtShort(new Date(t).toISOString()))}</text>`);
     }
     return `<div class="card">
-      <h3>Timeline</h3>
+      <h3>Timeline <span class="muted">(shown findings)</span></h3>
       <svg class="timeline" viewBox="0 0 ${W} ${H}" role="img" aria-label="Downtime timeline">
         <rect x="${pad}" y="10" width="${W - 2 * pad}" height="${H - 34}" rx="6" class="band"/>
         <line x1="${pad}" x2="${W - pad}" y1="${H - 24}" y2="${H - 24}" class="axis"/>
@@ -283,48 +380,81 @@ class DowntimeAuditorPanel extends HTMLElement {
         ${marks.join("")}
       </svg>
       <div class="legend">
-        <span><i style="background:var(--da-red)"></i>Interrupted (at shutdown)</span>
-        <span><i style="background:var(--da-orange)"></i>Missed — scheduled time</span>
-        <span><i style="background:var(--da-amber)"></i>Possibly missed</span>
-        <span><i class="bar" style="background:var(--da-orange)"></i>State change (seen at startup)</span>
+        <span>◆ Interrupted (at shutdown)</span><span>● Missed — scheduled time</span>
+        <span>| State change (seen at startup)</span><span>○ Fired at startup</span>
+        <span class="sep"></span>
+        ${SEVERITIES.map((s) => `<span><i style="background:${s.color}"></i>${s.label}</span>`).join("")}
       </div>
     </div>`;
   }
 
-  _row(f, key) {
-    const c = CAT[f.category] || { color: "var(--da-grey)", label: f.category, icon: "mdi:alert" };
-    const open = this._open.has(key);
-    const d = f.details || {};
-    const isScript = String(f.entity_id || "").startsWith("script.");
+  _editorLinks(f) {
     const links = [];
+    const isScript = String(f.entity_id || "").startsWith("script.");
     if (f.item_id) {
-      links.push(`<a href="#" data-nav="/config/${isScript ? "script" : "automation"}/edit/${esc(f.item_id)}"><ha-icon icon="mdi:pencil"></ha-icon>Edit</a>`);
-      links.push(`<a href="#" data-nav="/config/${isScript ? "script" : "automation"}/trace/${esc(f.item_id)}"><ha-icon icon="mdi:timeline-text-outline"></ha-icon>Traces</a>`);
+      const kind = isScript ? "script" : "automation";
+      // Real links: a plain click navigates inside HA; Ctrl/middle-click opens a new tab.
+      links.push(`<a href="/config/${kind}/edit/${encodeURIComponent(f.item_id)}" data-nav><ha-icon icon="mdi:pencil"></ha-icon>Edit</a>`);
+      links.push(`<a href="/config/${kind}/trace/${encodeURIComponent(f.item_id)}" data-nav><ha-icon icon="mdi:timeline-text-outline"></ha-icon>Traces</a>`);
     }
     links.push(`<a href="#" data-more="${esc(f.entity_id)}"><ha-icon icon="mdi:information-outline"></ha-icon>Details</a>`);
+    const d = f.details || {};
     if (d.entity) links.push(`<a href="#" data-more="${esc(d.entity)}"><ha-icon icon="mdi:radar"></ha-icon>${esc(d.entity)}</a>`);
+    return links;
+  }
+
+  _row(f, key, { canRate = true, live = false } = {}) {
+    const t = TYPE[f.type] || { label: f.type, icon: "mdi:alert" };
+    const sev = SEV[f.severity];
+    const open = STATE.open.includes(key);
+    const cond = (f.details || {}).conditions || {};
     const trig = f.trigger_id ? `trigger “${esc(f.trigger_id)}”` : f.trigger_index != null ? `trigger #${f.trigger_index}` : "";
-    return `<div class="row ${open ? "open" : ""}" style="--c:${c.color}">
+    return `<div class="row ${open ? "open" : ""} ${f.severity === "none" ? "dim" : ""}" style="--s:${sev ? sev.color : "var(--da-line)"}">
       <button class="row-head" data-toggle="${esc(key)}" aria-expanded="${open}">
-        <ha-icon icon="${c.icon}" class="cat-ico"></ha-icon>
+        <ha-icon icon="${t.icon}" class="type-ico" title="${esc(t.label)}"></ha-icon>
         <div class="row-main">
           <div class="row-title">${esc(f.name)} <span class="muted mono">${esc(f.entity_id)}</span></div>
           <div class="row-sum">${esc(f.summary)}</div>
         </div>
         <div class="row-tags">
+          ${sev ? `<span class="sev-badge" style="--s:${sev.color}">${sev.label}</span>` : live ? `<span class="tag">running</span>` : ""}
+          ${f.confidence && CONF[f.confidence] ? `<span class="tag conf" title="Confidence: ${esc(CONF[f.confidence].label)}">${this._meter(f.confidence)} ${esc(CONF[f.confidence].label)}</span>` : ""}
+          ${cond.likely === "fail" ? `<span class="tag" title="${esc(cond.why)}">conditions?</span>` : ""}
           ${f.platform ? `<span class="tag">${esc(f.platform)}</span>` : ""}
           ${trig ? `<span class="tag">${trig}</span>` : ""}
-          <span class="tag conf-${esc(f.confidence)}">${esc(f.confidence)}</span>
           <ha-icon icon="${open ? "mdi:chevron-up" : "mdi:chevron-down"}"></ha-icon>
         </div>
       </button>
-      ${open ? `<div class="row-body">${this._details(f)}<div class="links">${links.join("")}</div></div>` : ""}
+      ${open ? `<div class="row-body">${this._details(f, { canRate: canRate && !live })}<div class="links">${this._editorLinks(f).join("")}</div></div>` : ""}
     </div>`;
   }
 
-  _details(f) {
+  _severityPicker(f) {
+    const rateable = /^(automation|script)\./.test(String(f.entity_id || ""));
+    if (!rateable) return "";
+    const current = f.severity_source === "label" ? (f.severity_base || f.severity) : "";
+    return `<select class="sev-select" data-rate="${esc(f.entity_id)}" aria-label="Severity rating for ${esc(f.name)}">
+      <option value="" ${current ? "" : "selected"}>Unrated (Medium)</option>
+      ${SEVERITIES.map((s) => `<option value="${s.key}" ${current === s.key ? "selected" : ""}>${s.label}</option>`).join("")}
+    </select>`;
+  }
+
+  _details(f, { canRate = true } = {}) {
     const d = f.details || {};
     const parts = [];
+    if (f.severity) {
+      parts.push(`<div class="kv"><div class="k">Severity</div><div class="v sev-line">
+        <span class="sev-badge" style="--s:${SEV[f.severity]?.color}">${esc(SEV[f.severity]?.label || f.severity)}</span>
+        <span class="muted">${esc(f.severity_reason || SOURCE_TEXT[f.severity_source] || "")}</span></div></div>`);
+      if (canRate && this._severityPicker(f)) {
+        parts.push(`<div class="kv"><div class="k">Rate this ${String(f.entity_id).startsWith("script.") ? "script" : "automation"}</div>
+          <div class="v">${this._severityPicker(f)} <span class="muted small-inline">Saved as a <code>downtime_auditor_sev</code> label.</span></div></div>`);
+      }
+    }
+    if (f.confidence) {
+      parts.push(`<div class="kv"><div class="k">Confidence</div><div class="v">${this._meter(f.confidence)} ${esc(CONF[f.confidence]?.label || f.confidence)}</div></div>`);
+    }
+    if (d.conditions) parts.push(this._conditions(d.conditions));
     if (f.occurrences?.length) {
       parts.push(`<div class="kv"><div class="k">Due at${f.count > f.occurrences.length ? ` (showing ${f.occurrences.length} of ${f.count})` : ""}</div>
         <div class="v chips">${f.occurrences.map((o) => `<span class="mini">${esc(o)}</span>`).join("")}</div></div>`);
@@ -360,6 +490,21 @@ class DowntimeAuditorPanel extends HTMLElement {
     return parts.join("");
   }
 
+  _conditions(c) {
+    const ICON = { pass: "mdi:check-circle-outline", fail: "mdi:close-circle-outline", unknown: "mdi:help-circle-outline" };
+    const basis = { baseline: "pre-downtime values", history: "recorder history", none: "no recorded states" }[c.basis] || c.basis;
+    const step = (s) => `<li class="cs ${esc(s.result)}"><ha-icon icon="${ICON[s.result] || ICON.unknown}"></ha-icon>
+      <b>${esc(s.condition)}</b>${s.why ? ` — ${esc(s.why)}` : ""}${s.basis ? ` <span class="muted">(${esc({ baseline: "pre-downtime value", history: "history" }[s.basis] || s.basis)})</span>` : ""}
+      ${s.conditions?.length ? `<ul>${s.conditions.map(step).join("")}</ul>` : ""}</li>`;
+    const headline = c.likely === "fail"
+      ? "Probably failed — based on pre-downtime values, which may have changed while HA was down"
+      : { pass: "Would have passed", fail: "Would have failed", unknown: "Couldn't be checked" }[c.result] || c.result;
+    return `<div class="kv"><div class="k">Conditions</div><div class="v">
+      <div class="cond-head ${esc(c.likely === "fail" ? "unknown" : c.result)}">${esc(headline)}</div>
+      <div class="muted">${c.checked > 1 ? `Checked at ${esc(c.checked)} due times; breakdown for ${esc(fmtTime(c.shown_for))}. ` : ""}From ${esc(basis)}.</div>
+      <ul class="cond-tree">${(c.steps || []).map(step).join("")}</ul></div></div>`;
+  }
+
   _historyView() {
     const h = this._history;
     if (!h) return `<div class="empty">Loading history…</div>`;
@@ -372,31 +517,34 @@ class DowntimeAuditorPanel extends HTMLElement {
       const v = it.window?.duration_seconds || 0;
       const bh = Math.max(2, (Math.sqrt(v) / Math.sqrt(max)) * (H - 40));
       const act = (it.counts?.interrupted || 0) + (it.counts?.missed || 0);
-      const fill = it.window?.clean_shutdown ? "var(--da-blue)" : "var(--da-red)";
+      const fill = it.window?.clean_shutdown ? "var(--da-bar-clean)" : "var(--da-bar-unclean)";
+      const top = it.highest_severity && it.highest_severity !== "none" ? SEV[it.highest_severity] : null;
       return `<g class="bar-g" data-file="${esc(it.available ? it.file : "")}">
-        <title>${esc(fmtTime(it.window?.start))}: ${esc(it.window?.duration)} · ${act} missed/interrupted</title>
+        <title>${esc(fmtTime(it.window?.start))}: ${esc(it.window?.duration)} · ${act} missed/interrupted${top ? ` · highest ${top.label}` : ""}</title>
         <rect x="${20 + i * bw + bw * 0.15}" y="${H - 20 - bh}" width="${bw * 0.7}" height="${bh}" rx="3" fill="${fill}"/>
-        ${act ? `<circle cx="${20 + i * bw + bw / 2}" cy="${H - 26 - bh}" r="4" fill="var(--da-orange)"/>` : ""}
+        ${top ? `<circle cx="${20 + i * bw + bw / 2}" cy="${H - 26 - bh}" r="4" fill="${top.color}"/>` : ""}
       </g>`;
     }).join("");
     return `<div class="card">
         <h3>Downtime durations <span class="muted">(last ${items.length}, √ scale)</span></h3>
         <svg class="hist" viewBox="0 0 ${W} ${H}">${bars}
           <line x1="20" x2="${W - 20}" y1="${H - 20}" y2="${H - 20}" class="axis"/></svg>
-        <div class="legend"><span><i style="background:var(--da-blue)"></i>Clean</span><span><i style="background:var(--da-red)"></i>Unclean</span><span><i class="dot" style="background:var(--da-orange)"></i>Had missed / interrupted</span></div>
+        <div class="legend"><span><i style="background:var(--da-bar-clean)"></i>Clean</span><span><i style="background:var(--da-bar-unclean)"></i>Unclean</span>
+          <span>Dot = highest severity</span></div>
       </div>
       <div class="card">
         <p class="muted small">${h.length} downtime${h.length === 1 ? "" : "s"} recorded · ${withReport} with a saved report.
           Full reports are kept only when something was found, for the retention period set in the integration's options.</p>
         <table class="tbl">
-        <thead><tr><th>Went down</th><th>Duration</th><th>Shutdown</th>${CATS.slice(0, 4).map((c) => `<th title="${c.label}"><ha-icon icon="${c.icon}"></ha-icon></th>`).join("")}<th></th></tr></thead>
+        <thead><tr><th>Went down</th><th>Duration</th><th>Shutdown</th><th>Highest</th>${TYPES.map((t) => `<th title="${t.label}"><ha-icon icon="${t.icon}"></ha-icon></th>`).join("")}<th></th></tr></thead>
         <tbody>${h.map((it) => `<tr>
-          <td>${esc(fmtTime(it.window?.start))}</td><td>${esc(it.window?.duration)}</td>
+          <td>${esc(fmtTime(it.window?.start))}${it.legacy ? ` <span class="tag" title="Recorded by v0.4, before severity ratings existed">v0.4</span>` : ""}</td><td>${esc(it.window?.duration)}</td>
           <td><span class="chip sm ${it.window?.clean_shutdown ? "ok" : "bad"}">${it.window?.clean_shutdown ? "clean" : "unclean"}</span></td>
-          ${CATS.slice(0, 4).map((c) => `<td class="${it.counts?.[c.key] ? "hot" : "muted"}">${it.counts?.[c.key] || 0}</td>`).join("")}
+          <td>${it.highest_severity ? `<span class="sev-badge" style="--s:${SEV[it.highest_severity]?.color}">${esc(SEV[it.highest_severity]?.label)}</span>` : `<span class="muted">—</span>`}</td>
+          ${TYPES.map((t) => `<td class="${it.counts?.[t.key] ? "hot" : "muted"}">${it.counts?.[t.key] || 0}</td>`).join("")}
           <td>${it.available ? `<a href="#" data-file="${esc(it.file)}">Open</a>`
             : it.file ? `<span class="muted" title="Older than the report retention period">expired</span>`
-            : `<span class="muted" title="Nothing was missed or interrupted, so only this summary was kept">nothing found</span>`}</td></tr>`).join("")}
+            : `<span class="muted" title="Nothing worth keeping was found, so only this summary was kept">nothing found</span>`}</td></tr>`).join("")}
         </tbody></table></div>`;
   }
 
@@ -405,22 +553,29 @@ class DowntimeAuditorPanel extends HTMLElement {
     if (!s) return `<div class="empty">Loading…</div>`;
     const hbAge = s.last_heartbeat ? (Date.now() - new Date(s.last_heartbeat).getTime()) / 1000 : Infinity;
     const healthy = s.tracking && hbAge < (s.heartbeat_interval || 60) * 2.5;
+    const sevLabel = (k) => SEV[k]?.label || k;
     return `<div class="card hero">
         <div class="hero-main"><div class="label">Tracking</div>
           <div class="dur ${healthy ? "" : "warn"}">${s.tracking ? (healthy ? "Healthy" : "Stale") : "Waiting for startup"}</div>
           <div class="range">Last heartbeat ${esc(fmtAgo(s.last_heartbeat))} · every ${esc(s.heartbeat_interval)}s</div></div>
         <div class="hero-side meta">
           <div>Session started ${esc(fmtTime(s.session_started))}</div>
-          <div><b>${s.baseline_automations}</b> automations · <b>${s.baseline_entities}</b> trigger entities · <b>${s.baseline_templates}</b> templates in baseline</div>
+          <div><b>${s.baseline_automations}</b> automations · <b>${s.baseline_entities}</b> trigger/condition entities · <b>${s.baseline_templates}</b> templates in baseline</div>
           <div>Startup settle delay ${esc(s.startup_delay)}s · JSON reports ${s.json_enabled ? "on" : "off"}</div>
         </div></div>
+      <div class="card"><h3>Severity ratings</h3>
+        <p class="muted">Rate automations and scripts with the <code>downtime_auditor_sev: …</code> labels (Critical, High, Medium, Low, None), or from a finding's details.
+          Unrated means Medium. Repairs: <b>${esc(sevLabel(s.repairs_min_severity))}</b> and up · push: <b>${esc(sevLabel(s.push_min_severity))}</b> and up (change these in the integration's options).</p>
+        <button class="btn secondary" data-act="create-labels">Create severity labels</button>
+        <span class="muted small-inline">Only labels that are missing are created.</span>
+      </div>
       <div class="card"><h3>Running right now <span class="muted">(${s.running_now.length})</span></h3>
         <p class="muted">These would be reported as interrupted if Home Assistant stopped this instant.</p>
         ${s.running_now.length ? s.running_now.map((r, i) => this._row({
-          category: "interrupted", confidence: "live", name: r.name, entity_id: r.entity_id, item_id: r.item_id, platform: r.domain,
+          type: "interrupted", name: r.name, entity_id: r.entity_id, item_id: r.item_id, platform: r.domain,
           summary: (r.runs || []).map((x) => `at ${x.last_step || "?"}${x.trigger ? ` · ${x.trigger}` : ""}`).join(" | ") || `${r.current_runs} run(s)`,
           details: { mode: r.mode, runs: r.runs },
-        }, `live|${i}|${r.entity_id}`)).join("") : `<div class="all-good"><ha-icon icon="mdi:sleep"></ha-icon>Nothing is running.</div>`}
+        }, `live|${i}|${r.entity_id}`, { live: true })).join("") : `<div class="all-good"><ha-icon icon="mdi:sleep"></ha-icon>Nothing is running.</div>`}
       </div>`;
   }
 
@@ -429,8 +584,8 @@ class DowntimeAuditorPanel extends HTMLElement {
     const toInput = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     const now = new Date();
     const lastNight = new Date(now); lastNight.setHours(1, 0, 0, 0); if (lastNight > now) lastNight.setDate(lastNight.getDate() - 1);
-    const s = this._wiStart || toInput(new Date(now.getTime() - 4 * 3600e3));
-    const e = this._wiEnd || toInput(now);
+    const s = STATE.wiStart || toInput(new Date(now.getTime() - 4 * 3600e3));
+    const e = STATE.wiEnd || toInput(now);
     return `<div class="card">
         <h3>What would a downtime miss?</h3>
         <p class="muted">Pick a window to see which time, time-pattern, sun and calendar triggers would be skipped if Home Assistant were down.</p>
@@ -446,63 +601,96 @@ class DowntimeAuditorPanel extends HTMLElement {
           <button class="chip-btn" data-preset="${toInput(now)}|${toInput(new Date(now.getTime() + 2 * 3600e3))}">Next 2 hours</button>
         </div>
       </div>
-      ${this._wiBusy ? `<div class="empty">Analysing…</div>` : this._whatif ? this._reportView(this._whatif, { whatIf: true }) : ""}`;
+      ${this._wiBusy ? `<div class="empty">Analysing…</div>` : STATE.whatif ? this._reportView(STATE.whatif, { whatIf: true }) : ""}`;
   }
 
   // ---------------------------------------------------------------- events
 
   _bind() {
     const r = this.shadowRoot;
-    r.querySelectorAll("[data-tab]").forEach((el) => el.addEventListener("click", (ev) => { ev.preventDefault(); this._setTab(el.dataset.tab); }));
-    r.querySelectorAll("[data-filter]").forEach((el) => el.addEventListener("click", () => {
-      const k = el.dataset.filter;
-      this._filter.has(k) ? this._filter.delete(k) : this._filter.add(k);
-      this._render();
-    }));
-    r.querySelectorAll("[data-toggle]").forEach((el) => el.addEventListener("click", () => {
-      const k = el.dataset.toggle;
-      this._open.has(k) ? this._open.delete(k) : this._open.add(k);
-      this._render();
-    }));
-    r.querySelectorAll("[data-nav]").forEach((el) => el.addEventListener("click", (ev) => { ev.preventDefault(); this._navigate(el.dataset.nav); }));
-    r.querySelectorAll("[data-more]").forEach((el) => el.addEventListener("click", (ev) => { ev.preventDefault(); this._moreInfo(el.dataset.more); }));
-    r.querySelectorAll("[data-file]").forEach((el) => el.addEventListener("click", (ev) => {
+    const on = (sel, evt, fn) => r.querySelectorAll(sel).forEach((el) => el.addEventListener(evt, (ev) => fn(el, ev)));
+    on("[data-tab]", "click", (el, ev) => { ev.preventDefault(); this._setTab(el.dataset.tab); });
+    on("[data-type]", "click", (el) => { this._toggle(STATE.types, el.dataset.type); this._render(); });
+    on("[data-conf]", "click", (el) => { this._toggle(STATE.confidences, el.dataset.conf); this._render(); });
+    on("[data-toggle]", "click", (el) => { this._toggle(STATE.open, el.dataset.toggle); this._render(); });
+    on("a[data-nav]", "click", (el, ev) => {
+      // Let the browser handle new-tab gestures; navigate in-app on a plain click.
+      if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+      ev.preventDefault();
+      saveState();
+      this._navigate(el.getAttribute("href"));
+    });
+    on("[data-more]", "click", (el, ev) => { ev.preventDefault(); this._moreInfo(el.dataset.more); });
+    on("[data-file]", "click", (el, ev) => {
       ev.preventDefault();
       if (!el.dataset.file) return;
-      this._tab = "report";
+      STATE.tab = "report";
       this._loadReport(el.dataset.file);
-    }));
-    r.querySelectorAll("[data-preset]").forEach((el) => el.addEventListener("click", () => {
-      [this._wiStart, this._wiEnd] = el.dataset.preset.split("|");
+    });
+    on("[data-preset]", "click", (el) => {
+      [STATE.wiStart, STATE.wiEnd] = el.dataset.preset.split("|");
       this._runWhatIf();
-    }));
+    });
+    on("select[data-act=min-severity]", "change", (el) => { STATE.minSeverity = el.value; this._render(); });
+    on("input[data-act=show-none]", "change", (el) => { STATE.showNone = el.checked; this._render(); });
+    on("select[data-rate]", "change", (el) => this._rate(el.dataset.rate, el.value || null));
     const search = r.querySelector(".search");
     if (search) search.addEventListener("input", (ev) => {
-      this._search = ev.target.value;
+      STATE.search = ev.target.value;
       clearTimeout(this._st);
       this._st = setTimeout(() => { this._render(); const s = this.shadowRoot.querySelector(".search"); if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); } }, 200);
     });
-    r.querySelectorAll("[data-act]").forEach((el) => el.addEventListener("click", (ev) => {
+    on("button[data-act], a[data-act]", "click", (el, ev) => {
       ev.preventDefault();
       const a = el.dataset.act;
       if (a === "refresh") {
         this._history = null;
-        if (this._tab === "history") this._loadHistory();
-        else if (this._tab === "live") this._loadStatus();
-        else this._loadReport(this._viewingFile);
+        this._notice = null;
+        if (STATE.tab === "history") this._loadHistory();
+        else if (STATE.tab === "live") this._loadStatus();
+        else this._loadReport(STATE.viewingFile || undefined);
       } else if (a === "latest") this._loadReport();
       else if (a === "whatif") {
-        this._wiStart = r.querySelector("#wi-start").value;
-        this._wiEnd = r.querySelector("#wi-end").value;
+        STATE.wiStart = r.querySelector("#wi-start").value;
+        STATE.wiEnd = r.querySelector("#wi-end").value;
         this._runWhatIf();
-      }
-    }));
+      } else if (a === "create-labels") this._createLabels();
+    });
+  }
+
+  _toggle(list, key) {
+    const i = list.indexOf(key);
+    if (i >= 0) list.splice(i, 1); else list.push(key);
+  }
+
+  async _rate(entityId, severity) {
+    try {
+      await this._ws("set_severity", { entity_id: entityId, severity });
+      this._error = null;
+      this._notice = STATE.tab === "whatif" || STATE.viewingFile
+        ? `Rating saved for ${entityId}. It applies to the latest report and new reports.`
+        : null;
+    } catch (e) {
+      this._error = e.message || String(e);
+    }
+    if (STATE.tab === "whatif" && STATE.whatif && STATE.wiStart && STATE.wiEnd) await this._runWhatIf();
+    else if (!STATE.viewingFile) await this._loadReport();
+    else this._render();
+  }
+
+  async _createLabels() {
+    try {
+      const res = await this._ws("create_severity_labels");
+      this._notice = res.created?.length ? `Created: ${res.created.join(", ")}` : "All severity labels already exist.";
+      this._error = null;
+    } catch (e) { this._error = e.message || String(e); }
+    this._render();
   }
 
   async _runWhatIf() {
     this._wiBusy = true; this._render();
     try {
-      this._whatif = await this._ws("what_if", { start: this._wiStart.replace("T", " ") + ":00", end: this._wiEnd.replace("T", " ") + ":00" });
+      STATE.whatif = await this._ws("what_if", { start: STATE.wiStart.replace("T", " ") + ":00", end: STATE.wiEnd.replace("T", " ") + ":00" });
       this._error = null;
     } catch (e) { this._error = e.message || String(e); }
     this._wiBusy = false; this._render();
@@ -512,7 +700,10 @@ class DowntimeAuditorPanel extends HTMLElement {
 const STYLE = `
 :host {
   display: block; height: 100%;
-  --da-red: #d64545; --da-orange: #e8833a; --da-amber: #d9a520; --da-blue: #3b82c4; --da-grey: #8a8f98;
+  /* Severity is the only colored attribute. */
+  --da-sev-critical: #d64545; --da-sev-high: #e8833a; --da-sev-medium: #c99a12; --da-sev-low: #607d8b; --da-sev-none: #9aa0a6;
+  --da-bar-clean: #7a8794; --da-bar-unclean: #a1584f;
+  --da-ok: #2e9d57; --da-bad: #d64545; --da-info: #3b82c4;
   --da-bg: var(--primary-background-color, #f5f6f8);
   --da-card: var(--card-background-color, #fff);
   --da-text: var(--primary-text-color, #1f2328);
@@ -545,66 +736,82 @@ h3 { font-size: 16px; }
 .mono, code, pre { font-family: var(--code-font-family, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; }
 code { background: var(--da-bg); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
 .banner { background: color-mix(in srgb, var(--da-accent) 12%, var(--da-card)); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 14px; }
-.banner.err { background: color-mix(in srgb, var(--da-red) 14%, var(--da-card)); }
+.banner.err { background: color-mix(in srgb, var(--da-bad) 14%, var(--da-card)); }
 .hero { display: flex; flex-wrap: wrap; gap: 16px 32px; align-items: center; }
 .hero-main { flex: 1 1 280px; }
 .hero-side { flex: 1 1 280px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .label { text-transform: uppercase; font-size: 11px; letter-spacing: .08em; color: var(--da-muted); }
 .dur { font-size: 40px; font-weight: 300; line-height: 1.15; }
-.dur.warn, .warn { color: var(--da-orange); }
+.dur.warn, .warn { color: var(--da-sev-high); }
 .range { color: var(--da-muted); font-size: 14px; }
 .arrow { color: var(--da-muted); margin: 0 4px; }
 .meta { font-size: 13px; color: var(--da-muted); display: flex; flex-direction: column; gap: 3px; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 13px; font-weight: 500; }
 .chip ha-icon { --mdc-icon-size: 16px; }
-.chip.ok { background: color-mix(in srgb, #2e9d57 15%, transparent); color: #2e9d57; }
-.chip.bad { background: color-mix(in srgb, var(--da-red) 15%, transparent); color: var(--da-red); }
-.chip.info { background: color-mix(in srgb, var(--da-blue) 15%, transparent); color: var(--da-blue); }
+.chip.ok { background: color-mix(in srgb, var(--da-ok) 15%, transparent); color: var(--da-ok); }
+.chip.bad { background: color-mix(in srgb, var(--da-bad) 15%, transparent); color: var(--da-bad); }
+.chip.info { background: color-mix(in srgb, var(--da-info) 15%, transparent); color: var(--da-info); }
 .chip.sm { padding: 1px 8px; font-size: 12px; }
+.sev-badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+  color: var(--s); background: color-mix(in srgb, var(--s) 16%, transparent); border: 1px solid color-mix(in srgb, var(--s) 45%, transparent); }
+.sev-badge.lg { font-size: 13px; padding: 4px 10px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .tile { text-align: left; background: var(--da-card); border: 1px solid var(--da-line); border-radius: var(--da-radius); padding: 12px 14px;
-  cursor: pointer; color: var(--da-text); font: inherit; position: relative; overflow: hidden; opacity: .55; transition: opacity .15s; }
-.tile.on { opacity: 1; border-color: var(--c); }
-.tile::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--c); }
-.tile ha-icon { color: var(--c); --mdc-icon-size: 20px; }
+  cursor: pointer; color: var(--da-text); font: inherit; opacity: .55; transition: opacity .15s; }
+.tile.on { opacity: 1; border-color: var(--da-accent); }
+.tile ha-icon { color: var(--da-muted); --mdc-icon-size: 20px; }
 .tile .n { font-size: 28px; font-weight: 400; margin-top: 2px; }
 .tile .l { font-size: 13px; color: var(--da-muted); }
 .timeline, .hist { width: 100%; height: auto; display: block; }
 .hist .bar-g { cursor: pointer; }
-.band { fill: color-mix(in srgb, var(--da-red) 7%, transparent); stroke: color-mix(in srgb, var(--da-red) 25%, transparent); }
+.band { fill: color-mix(in srgb, var(--da-muted) 7%, transparent); stroke: color-mix(in srgb, var(--da-muted) 25%, transparent); }
 .axis { stroke: var(--da-line); }
 svg text { fill: var(--da-muted); font-size: 11px; }
-.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--da-muted); margin-top: 8px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--da-muted); margin-top: 8px; align-items: center; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
-.legend i.bar { width: 3px; height: 12px; border-radius: 1px; }
+.legend .sep { width: 1px; height: 14px; background: var(--da-line); }
 .list-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .list-head h3 { margin: 0; }
 .search { flex: 0 1 320px; min-width: 180px; padding: 8px 12px; border: 1px solid var(--da-line); border-radius: 8px; background: var(--da-bg); color: var(--da-text); font: inherit; font-size: 14px; }
-.row { border: 1px solid var(--da-line); border-left: 4px solid var(--c); border-radius: 8px; margin: 8px 0; overflow: hidden; }
+.filters { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: flex-end; padding: 8px 0 4px; border-bottom: 1px solid var(--da-line); margin-bottom: 4px; }
+.fl { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--da-muted); }
+.fl.toggle { flex-direction: row; align-items: center; gap: 6px; color: var(--da-text); font-size: 13px; }
+.fl select, .sev-select { padding: 6px 8px; border: 1px solid var(--da-line); border-radius: 8px; background: var(--da-bg); color: var(--da-text); font: inherit; font-size: 13px; }
+.meter { display: inline-flex; gap: 2px; vertical-align: middle; }
+.meter i { width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--da-muted); }
+.meter i.f { background: var(--da-muted); }
+.row { border: 1px solid var(--da-line); border-left: 4px solid var(--s); border-radius: 8px; margin: 8px 0; overflow: hidden; }
+.row.dim { opacity: .7; }
 .row-head { display: flex; gap: 12px; align-items: flex-start; width: 100%; background: none; border: 0; padding: 10px 12px; text-align: left; cursor: pointer; color: var(--da-text); font: inherit; }
-.row-head:hover { background: color-mix(in srgb, var(--c) 6%, transparent); }
-.cat-ico { color: var(--c); --mdc-icon-size: 20px; margin-top: 2px; flex: none; }
+.row-head:hover { background: color-mix(in srgb, var(--s) 6%, transparent); }
+.type-ico { color: var(--da-muted); --mdc-icon-size: 20px; margin-top: 2px; flex: none; }
 .row-main { flex: 1; min-width: 0; }
 .row-title { font-weight: 500; font-size: 14px; }
 .row-title .mono { margin-left: 6px; }
 .row-sum { font-size: 13px; color: var(--da-muted); margin-top: 2px; overflow-wrap: anywhere; }
-.row-tags { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; flex: none; max-width: 40%; }
+.row-tags { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; flex: none; max-width: 45%; }
 .tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--da-bg); color: var(--da-muted); white-space: nowrap; }
-.tag.conf-high { color: var(--da-red); }
-.tag.conf-medium { color: var(--da-orange); }
+.tag.conf { display: inline-flex; align-items: center; gap: 4px; }
 .row-body { padding: 4px 16px 12px 44px; font-size: 13px; }
-.kv { display: grid; grid-template-columns: 110px 1fr; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--da-line); }
+.kv { display: grid; grid-template-columns: 130px 1fr; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--da-line); }
 .k { color: var(--da-muted); }
+.sev-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.small-inline { font-size: 12px; margin-left: 6px; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .mini { background: var(--da-bg); border-radius: 4px; padding: 1px 6px; font-family: var(--code-font-family, monospace); font-size: 12px; }
 .ba { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.cond-head { font-weight: 500; }
+.cond-tree, .cond-tree ul { list-style: none; margin: 4px 0 0; padding-left: 0; }
+.cond-tree ul { padding-left: 22px; }
+.cs { margin: 3px 0; }
+.cs ha-icon { --mdc-icon-size: 16px; vertical-align: -3px; margin-right: 4px; color: var(--da-muted); }
 .run { background: var(--da-bg); border-radius: 6px; padding: 8px 10px; margin: 8px 0; display: flex; flex-direction: column; gap: 3px; }
 .links { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; }
 .links a { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
 .links ha-icon { --mdc-icon-size: 16px; }
 .raw summary { cursor: pointer; color: var(--da-muted); margin-top: 8px; }
 .raw pre { background: var(--da-bg); padding: 8px; border-radius: 6px; overflow: auto; max-height: 320px; }
-.all-good { display: flex; align-items: center; gap: 8px; color: #2e9d57; padding: 12px 4px; }
+.all-good { display: flex; align-items: center; gap: 8px; color: var(--da-ok); padding: 12px 4px; }
 .empty { color: var(--da-muted); padding: 24px; text-align: center; }
 .empty-card { text-align: center; padding: 40px 24px; }
 .empty-card .big { --mdc-icon-size: 48px; color: var(--da-muted); }
@@ -614,20 +821,24 @@ svg text { fill: var(--da-muted); font-size: 11px; }
 .tbl th, .tbl td { text-align: left; padding: 8px; border-bottom: 1px solid var(--da-line); }
 .tbl th { color: var(--da-muted); font-weight: 500; }
 .tbl th ha-icon { --mdc-icon-size: 16px; }
-.tbl td.hot { color: var(--da-orange); font-weight: 600; }
+.tbl td.hot { font-weight: 600; }
 .wi { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
 .wi label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--da-muted); }
 .wi input { padding: 8px 10px; border: 1px solid var(--da-line); border-radius: 8px; background: var(--da-bg); color: var(--da-text); font: inherit; }
 .btn { background: var(--da-accent); color: var(--text-primary-color, #fff); border: 0; border-radius: 8px; padding: 9px 20px; font: inherit; font-weight: 500; cursor: pointer; }
+.btn.secondary { background: var(--da-bg); color: var(--da-text); border: 1px solid var(--da-line); }
 .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .chip-btn { background: var(--da-bg); border: 1px solid var(--da-line); color: var(--da-text); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+.chip-btn.sm { padding: 3px 10px; font-size: 12px; opacity: .55; display: inline-flex; align-items: center; gap: 4px; }
+.chip-btn.sm.on { opacity: 1; border-color: var(--da-accent); }
 @media (max-width: 600px) {
   .content { padding: 8px; }
-  .row-tags { display: none; }
+  .row-tags .tag:not(.conf) { display: none; }
+  .row-tags { max-width: 40%; }
   .row-body { padding-left: 12px; }
   .kv { grid-template-columns: 1fr; gap: 2px; }
   .dur { font-size: 32px; }
-  .tbl th:nth-child(n+4), .tbl td:nth-child(n+4):not(:last-child) { display: none; }
+  .tbl th:nth-child(n+5), .tbl td:nth-child(n+5):not(:last-child) { display: none; }
 }
 `;
 
