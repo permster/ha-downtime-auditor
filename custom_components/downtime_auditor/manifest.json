@@ -8,6 +8,7 @@
     "http",
     "panel_custom",
     "persistent_notification",
+    "recorder",
     "script",
     "trace"
   ],
