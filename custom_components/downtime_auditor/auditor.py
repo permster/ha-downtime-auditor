@@ -10,6 +10,7 @@ import uuid
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_STATE_CHANGED, __version__ as HA_VERSION
 from homeassistant.core import CoreState, Event, HassJob, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er, label_registry as lr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.start import async_at_started
@@ -117,6 +118,9 @@ class DowntimeAuditor:
         self.last_report: dict[str, Any] | None = None
         self._unsubs: list = []
         self._analysis_unsub = None
+        self._analysis_due: datetime | None = None
+        self.version: str | None = None  # integration version (set by async_setup_entry)
+        self._rerate_unsub = None
         self._frozen = False  # set once the shutdown snapshot is written
 
     # ------------------------------------------------------------------ options
@@ -158,6 +162,15 @@ class DowntimeAuditor:
                 EVENT_STATE_CHANGED, self._on_state_changed, event_filter=self._state_filter
             )
         )
+        # Ratings changed outside the dashboard (HA's label editor) re-rate the current report.
+        self._unsubs.append(
+            self.hass.bus.async_listen(
+                er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_ratings_changed, event_filter=self._labels_filter
+            )
+        )
+        self._unsubs.append(
+            self.hass.bus.async_listen(lr.EVENT_LABEL_REGISTRY_UPDATED, self._on_ratings_changed)
+        )
 
         if self.hass.state is CoreState.running:
             # Loaded after startup (fresh install or config-entry reload):
@@ -177,12 +190,37 @@ class DowntimeAuditor:
         self._unsubs.clear()
         if self._analysis_unsub:
             self._analysis_unsub()
+        if self._rerate_unsub:
+            self._rerate_unsub()
+            self._rerate_unsub = None
         if self.active:
             # Mark as clean so a later reload doesn't look like a crash.
             self._refresh(clean=True)
             await self.store.async_save(self.data)
 
     # ------------------------------------------------------------------ events
+
+    @callback
+    def _labels_filter(self, event_data: Any) -> bool:
+        eid = str(event_data.get("entity_id", ""))
+        return (
+            event_data.get("action") == "update"
+            and "labels" in (event_data.get("changes") or {})
+            and (eid.startswith("automation.") or eid.startswith("script."))
+        )
+
+    @callback
+    def _on_ratings_changed(self, _event: Event) -> None:
+        """Debounced: a burst of label edits re-rates once."""
+        if self._rerate_unsub:
+            self._rerate_unsub()
+        self._rerate_unsub = async_call_later(
+            self.hass, 1, HassJob(self._async_rerate_job, cancel_on_shutdown=True)
+        )
+
+    async def _async_rerate_job(self, _now: datetime) -> None:
+        self._rerate_unsub = None
+        await self.async_rerate_last_report()
 
     @callback
     def _state_filter(self, event_data: Any) -> bool:
@@ -238,9 +276,22 @@ class DowntimeAuditor:
         self.started_at = dt_util.utcnow()
         delay = max(0, int(self.opt(CONF_STARTUP_DELAY)))
         _LOGGER.debug("HA started; analysing in %ss", delay)
+        self._analysis_due = self.started_at + timedelta(seconds=delay)
         self._analysis_unsub = async_call_later(
             self.hass, delay, HassJob(self._async_run_startup_analysis, cancel_on_shutdown=True)
         )
+
+    def pending(self) -> dict | None:
+        """While a restart is being analysed: what we're waiting for (for the dashboard)."""
+        if self.active:
+            return None
+        if self.started_at is None:
+            return {"state": "starting", "due_at": None, "startup_delay": int(self.opt(CONF_STARTUP_DELAY))}
+        return {
+            "state": "settling",
+            "due_at": self._analysis_due.isoformat() if self._analysis_due else None,
+            "startup_delay": int(self.opt(CONF_STARTUP_DELAY)),
+        }
 
     async def _async_run_startup_analysis(self, _now: datetime | None = None) -> None:
         self._analysis_unsub = None

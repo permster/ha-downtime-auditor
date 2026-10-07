@@ -60,6 +60,8 @@ def ws_status(hass: HomeAssistant, connection: websocket_api.ActiveConnection, m
         msg["id"],
         {
             "tracking": auditor.active,
+            "pending": auditor.pending(),
+            "version": auditor.version,
             "session_started": sess.get("setup_at"),
             "last_heartbeat": sess.get("last_heartbeat"),
             "heartbeat_interval": auditor.opt("heartbeat_interval"),

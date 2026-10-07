@@ -30,6 +30,7 @@ const TABS = [
   { key: "whatif", label: "What-if", icon: "mdi:flask-outline" },
 ];
 const SOURCE_TEXT = { label: "set by label", default: "unrated (default)" };
+const DENSE_OCCURRENCES = 40; // more due times than this are drawn as a span on the timeline
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -77,6 +78,7 @@ function loadState() {
   return { ...DEFAULT_STATE(), ...(saved && typeof saved === "object" ? saved : {}) };
 }
 const STATE = loadState();
+let LOADED_VERSION = null; // integration version this page's panel.js came from
 function saveState() {
   try { window.sessionStorage.setItem(STORE_KEY, JSON.stringify(STATE)); } catch (e) {
     // Quota (large what-if results): keep everything but the results.
@@ -102,6 +104,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     if (first) this._init();
     const mb = this.shadowRoot.querySelector("ha-menu-button");
     if (mb) mb.hass = hass;
+    if (STATE.tab === "live") this._watchRuns(hass);
   }
   get hass() { return this._hass; }
   set narrow(v) {
@@ -109,7 +112,31 @@ class DowntimeAuditorPanel extends HTMLElement {
     const mb = this.shadowRoot.querySelector("ha-menu-button");
     if (mb) mb.narrow = v;
   }
-  set panel(p) { this._panel = p; }
+  set panel(p) {
+    this._panel = p;
+    // The version this page's code was loaded with (module-level: survives re-created elements).
+    if (LOADED_VERSION === null && p?.config?.version) LOADED_VERSION = p.config.version;
+  }
+
+  // Live status: refresh the moment any automation/script starts or finishes,
+  // instead of waiting for the next poll. HA hands us a new `hass` on every state change.
+  _runSignature(hass) {
+    let sig = "";
+    for (const id in hass?.states || {}) {
+      if (!id.startsWith("automation.") && !id.startsWith("script.")) continue;
+      const cur = hass.states[id].attributes?.current;
+      if (cur > 0) sig += `${id}:${cur};`;
+    }
+    return sig;
+  }
+
+  _watchRuns(hass) {
+    const sig = this._runSignature(hass);
+    if (sig === this._runSig) return;
+    this._runSig = sig;
+    clearTimeout(this._runTimer);
+    this._runTimer = setTimeout(() => this._loadStatus(), 250);
+  }
 
   async _ws(type, extra = {}) {
     return this._hass.connection.sendMessagePromise({ type: `downtime_auditor/${type}`, ...extra });
@@ -125,9 +152,18 @@ class DowntimeAuditorPanel extends HTMLElement {
         if (!STATE.viewingFile) this._loadReport();
         this._history = null;
         if (STATE.tab === "history") this._loadHistory();
+        this._loadStatus(false);
       }, "downtime_auditor_report");
     } catch (e) { /* non-admin or older HA */ }
-    this._tick = setInterval(() => { if (STATE.tab === "live") this._loadStatus(); }, 10000);
+    // Every 2 s: poll while a restart is being analysed (countdown), every 10 s on Live status,
+    // and redraw Live status so "running for …" keeps counting.
+    let ticks = 0;
+    this._tick = setInterval(() => {
+      ticks += 1;
+      if (this._status?.pending) this._loadStatus();
+      else if (STATE.tab === "live" && ticks % 5 === 0) this._loadStatus();
+      else if (STATE.tab === "live" && this._status?.running_now?.length) this._render();
+    }, 2000);
   }
 
   disconnectedCallback() {
@@ -173,7 +209,10 @@ class DowntimeAuditorPanel extends HTMLElement {
   _setTab(t) {
     STATE.tab = t;
     if (t === "history" && !this._history) this._loadHistory();
-    if (t === "live") this._loadStatus();
+    if (t === "live") {
+      this._runSig = this._runSignature(this._hass); // baseline, so the very next change counts
+      this._loadStatus();
+    }
     this._render();
   }
 
@@ -204,7 +243,8 @@ class DowntimeAuditorPanel extends HTMLElement {
         ${TABS.map((t) => `<button role="tab" class="tab ${STATE.tab === t.key ? "active" : ""}" data-tab="${t.key}">
           <ha-icon icon="${t.icon}"></ha-icon><span>${t.label}</span></button>`).join("")}
       </div>
-      <div class="content">${this._error ? `<div class="banner err">${esc(this._error)}</div>` : ""}${
+      <div class="content">${this._staleBanner()}${this._pendingBanner()}${
+        this._error ? `<div class="banner err">${esc(this._error)}</div>` : ""}${
         this._notice ? `<div class="banner">${esc(this._notice)}</div>` : ""}${this._body()}</div>`;
     const mb = r.querySelector("ha-menu-button");
     if (mb) { mb.hass = this._hass; mb.narrow = this._narrow; }
@@ -212,6 +252,31 @@ class DowntimeAuditorPanel extends HTMLElement {
     if (content) content.scrollTop = scrollY;
     this._bind();
     saveState();
+  }
+
+  // The integration was updated but this page still runs the old dashboard code.
+  _staleBanner() {
+    const server = this._status?.version;
+    if (!server || !LOADED_VERSION || server === LOADED_VERSION) return "";
+    return `<div class="banner warn-banner"><ha-icon icon="mdi:update"></ha-icon>
+      <span>Downtime Auditor was updated to ${esc(server)}, but this page is still showing the ${esc(LOADED_VERSION)} dashboard.</span>
+      <button class="btn sm" data-act="reload">Reload</button></div>`;
+  }
+
+  // A restart is being analysed: the report below is the previous one.
+  _pendingBanner() {
+    const p = this._status?.pending;
+    if (!p) return "";
+    if (p.state === "starting" || !p.due_at) {
+      return `<div class="banner"><ha-icon icon="mdi:timer-sand"></ha-icon>
+        <span>Home Assistant is still starting. Downtime Auditor checks what the restart missed once it has
+        started and had ${esc(p.startup_delay)} s to settle.</span></div>`;
+    }
+    const secs = Math.max(0, Math.round((new Date(p.due_at).getTime() - Date.now()) / 1000));
+    return `<div class="banner"><ha-icon icon="mdi:timer-sand"></ha-icon>
+      <span>Home Assistant restarted. Checking what was missed ${secs ? `in <b>${secs} s</b>` : "now"}
+      (after a ${esc(p.startup_delay)} s settle delay, so integrations can restore their states).
+      ${this._report ? "The report below is from the previous restart." : ""}</span></div>`;
   }
 
   _body() {
@@ -352,6 +417,16 @@ class DowntimeAuditorPanel extends HTMLElement {
         marks.push(`<g><title>${esc(f.name)} — interrupted · ${esc(SEV[f.severity]?.label)}</title><rect x="${x(t0) - 5}" y="${y - 5}" width="10" height="10" transform="rotate(45 ${x(t0)} ${y})" fill="${color}"/></g>`);
       } else if (f.type === "fired_at_startup") {
         marks.push(`<g><title>${esc(f.name)} — fired at startup</title><circle cx="${x(t1)}" cy="${y}" r="4" fill="none" stroke="${color}" stroke-width="2"/></g>`);
+      } else if (f.occurrences?.length && (f.count || 0) > DENSE_OCCURRENCES) {
+        // Frequent triggers (e.g. every 15 s): one line over the whole span, not a wall of dots.
+        // Only the first 200 due times are stored, so a capped list runs to the window end.
+        const iso = f.occurrences_iso || [];
+        const first = iso.length ? new Date(iso[0]).getTime() : t0;
+        const last = f.count > iso.length || !iso.length ? t1 : new Date(iso[iso.length - 1]).getTime();
+        const xa = x(Math.max(t0, first)), xb = x(Math.min(t1, last));
+        marks.push(`<g><title>${esc(f.name)} — due ${esc(f.count)} times · ${esc(SEV[f.severity]?.label)}</title>
+          <line x1="${xa}" x2="${xb}" y1="${y}" y2="${y}" stroke="${color}" stroke-width="3" stroke-dasharray="2 3" stroke-linecap="round"/>
+          <text x="${xa}" y="${y - 6}" class="count">×${esc(f.count)}</text></g>`);
       } else if (f.occurrences?.length) {
         const occ = f.occurrences_iso?.length ? f.occurrences_iso : f.occurrences;
         for (const o of occ.slice(0, 200)) {
@@ -569,11 +644,20 @@ class DowntimeAuditorPanel extends HTMLElement {
         <button class="btn secondary" data-act="create-labels">Create severity labels</button>
         <span class="muted small-inline">Only labels that are missing are created.</span>
       </div>
-      <div class="card"><h3>Running right now <span class="muted">(${s.running_now.length})</span></h3>
-        <p class="muted">These would be reported as interrupted if Home Assistant stopped this instant.</p>
+      <div class="card"><h3>Running right now <span class="muted">(${s.running_now.length})</span>
+        <span class="live-dot" title="Updates as automations and scripts start and finish"></span></h3>
+        <p class="muted">These would be reported as interrupted if Home Assistant stopped this instant.
+          Most automations finish in milliseconds, so only ones in a <code>delay</code> or <code>wait</code> stay here.</p>
         ${s.running_now.length ? s.running_now.map((r, i) => this._row({
           type: "interrupted", name: r.name, entity_id: r.entity_id, item_id: r.item_id, platform: r.domain,
-          summary: (r.runs || []).map((x) => `at ${x.last_step || "?"}${x.trigger ? ` · ${x.trigger}` : ""}`).join(" | ") || `${r.current_runs} run(s)`,
+          summary: (r.runs || []).map((x) => {
+            const started = x.timestamp?.start ? new Date(x.timestamp.start).getTime() : null;
+            const step = x.last_step_config && typeof x.last_step_config === "object"
+              ? (x.last_step_config.delay != null ? ` (delay ${JSON.stringify(x.last_step_config.delay)})`
+                : x.last_step_config.wait_template || x.last_step_config.wait_for_trigger ? " (waiting)" : "")
+              : "";
+            return `${started ? `running ${fmtDur((Date.now() - started) / 1000)} · ` : ""}at ${x.last_step || "?"}${step}${x.trigger ? ` · ${x.trigger}` : ""}`;
+          }).join(" | ") || `${r.current_runs} run(s)`,
           details: { mode: r.mode, runs: r.runs },
         }, `live|${i}|${r.entity_id}`, { live: true })).join("") : `<div class="all-good"><ha-icon icon="mdi:sleep"></ha-icon>Nothing is running.</div>`}
       </div>`;
@@ -655,6 +739,7 @@ class DowntimeAuditorPanel extends HTMLElement {
         STATE.wiEnd = r.querySelector("#wi-end").value;
         this._runWhatIf();
       } else if (a === "create-labels") this._createLabels();
+      else if (a === "reload") window.location.reload();
     });
   }
 
@@ -786,7 +871,16 @@ svg text { fill: var(--da-muted); font-size: 11px; }
 .row-head:hover { background: color-mix(in srgb, var(--s) 6%, transparent); }
 .type-ico { color: var(--da-muted); --mdc-icon-size: 20px; margin-top: 2px; flex: none; }
 .row-main { flex: 1; min-width: 0; }
-.row-title { font-weight: 500; font-size: 14px; }
+.row-title { font-weight: 500; font-size: 14px; overflow-wrap: anywhere; }
+svg text.count { font-size: 10px; }
+.live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; vertical-align: 2px;
+  background: var(--da-ok); box-shadow: 0 0 0 0 color-mix(in srgb, var(--da-ok) 60%, transparent); animation: da-pulse 2s infinite; }
+@keyframes da-pulse { 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.banner { display: flex; gap: 10px; align-items: center; }
+.banner ha-icon { --mdc-icon-size: 20px; flex: none; }
+.banner span { flex: 1; }
+.warn-banner { background: color-mix(in srgb, var(--da-sev-high) 16%, var(--da-card)); }
+.btn.sm { padding: 5px 14px; font-size: 13px; }
 .row-title .mono { margin-left: 6px; }
 .row-sum { font-size: 13px; color: var(--da-muted); margin-top: 2px; overflow-wrap: anywhere; }
 .row-tags { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; flex: none; max-width: 45%; }

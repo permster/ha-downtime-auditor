@@ -166,3 +166,82 @@ async def test_set_severity_websocket(hass, enable_custom_integrations, hass_ws_
     await client.send_json({"id": 6, "type": "downtime_auditor/create_severity_labels"})
     msg = await client.receive_json()
     assert msg["success"] and msg["result"] == {"created": ["downtime_auditor_sev: none"]}
+
+
+async def test_label_changed_in_ha_rerates_report(hass, enable_custom_integrations):
+    """Rating in HA's own label editor (not the dashboard) updates the report and Repairs."""
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    from homeassistant.helpers import issue_registry as ir
+
+    t_missed = (dt_util.now() - timedelta(hours=1)).strftime("%H:%M:%S")
+    _entry, auditor = await _setup(hass, t_missed)
+    ents = er.async_get(hass)
+    ents.async_update_entity("automation.morning", labels={_label_id(hass, "high")})
+    await hass.async_block_till_done()
+    by = await _analyse(hass, auditor)
+    assert by["automation.morning"]["severity"] == "high"
+    ours = lambda: [i for (d, _), i in ir.async_get(hass).issues.items() if d == DOMAIN]  # noqa: E731
+    assert len(ours()) == 1  # High ≥ the default Repairs threshold
+
+    # Like HA's label editor: change the entity's labels directly.
+    ents.async_update_entity("automation.morning", labels={_label_id(hass, "none")})
+    ents.async_update_entity("automation.morning", labels={_label_id(hass, "none")})  # burst → one re-rate
+    await hass.async_block_till_done()
+    assert auditor.last_report["highest_severity"] == "high"  # debounced, not yet
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+    await hass.async_block_till_done()
+    (f,) = [f for f in auditor.last_report["findings"] if f["entity_id"] == "automation.morning"]
+    assert (f["severity"], f["severity_source"]) == ("none", "label")
+    assert ours() == []  # the Repair is gone
+    assert hass.states.get("binary_sensor.downtime_auditor_needs_attention").state == "off"
+
+    # Renaming a label so it no longer names a severity also re-rates (back to the default).
+    lr.async_get(hass).async_update(_label_id(hass, "none"), name="Not a rating")
+    await hass.async_block_till_done()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=4))
+    await hass.async_block_till_done()
+    (f,) = [f for f in auditor.last_report["findings"] if f["entity_id"] == "automation.morning"]
+    assert (f["severity"], f["severity_source"]) == ("medium", "default")
+
+
+async def test_status_reports_pending_analysis_and_version(hass, enable_custom_integrations, hass_ws_client, hass_storage):
+    """The dashboard can say 'checking what was missed in N s' after a restart."""
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+    from homeassistant.core import CoreState
+
+    hass.set_state(CoreState.not_running)
+    hass_storage[STORAGE_KEY] = {
+        "version": 1, "minor_version": 1, "key": STORAGE_KEY,
+        "data": {"session": {"id": "prev", "clean_shutdown": True,
+                             "shutdown_at": (dt_util.utcnow() - timedelta(minutes=5)).isoformat()},
+                 "labels_created": True},
+    }
+    entry = MockConfigEntry(domain=DOMAIN, version=2, options={"startup_delay": 30, "write_json": False})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    client = await hass_ws_client(hass)
+
+    async def status():
+        await client.send_json_auto_id({"type": "downtime_auditor/status"})
+        return (await client.receive_json())["result"]
+
+    st = await status()
+    assert st["pending"] == {"state": "starting", "due_at": None, "startup_delay": 30}
+    assert st["version"]  # the integration version, for the dashboard's reload check
+
+    hass.set_state(CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done()
+    st = await status()
+    assert st["pending"]["state"] == "settling"
+    due = dt_util.parse_datetime(st["pending"]["due_at"])
+    assert 25 <= (due - dt_util.utcnow()).total_seconds() <= 31
+
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
+    await hass.async_block_till_done()
+    st = await status()
+    assert st["pending"] is None and st["tracking"] is True

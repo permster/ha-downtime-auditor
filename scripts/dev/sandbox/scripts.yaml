@@ -1,0 +1,8 @@
+bedtime_lights:
+  alias: Bedtime lights
+  sequence:
+    - action: input_boolean.turn_on
+      target: { entity_id: input_boolean.guest_mode }
+    - delay: "00:15:00"
+    - action: input_boolean.turn_off
+      target: { entity_id: input_boolean.guest_mode }

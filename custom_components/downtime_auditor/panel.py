@@ -36,7 +36,8 @@ async def async_register_panel(hass: HomeAssistant, version: str) -> None:
         sidebar_icon="mdi:timeline-alert-outline",
         module_url=f"{PANEL_STATIC_URL}/panel.js?v={version}",
         require_admin=True,
-        config={},
+        # The dashboard compares this with downtime_auditor/status to spot a stale page after an update.
+        config={"version": version},
     )
 
 

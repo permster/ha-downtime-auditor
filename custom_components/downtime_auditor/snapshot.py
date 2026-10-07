@@ -230,8 +230,10 @@ def _running_traces(hass: HomeAssistant) -> dict[tuple[str, str], list[dict]]:
     if not isinstance(data, dict):
         return out
     for traces in data.values():
+        # HA 2026.9+: TraceData(runs, not_triggered); earlier: a dict of run_id -> trace.
+        bucket = getattr(traces, "runs", traces)
         try:
-            items = list(traces.values())
+            items = list(bucket.values())
         except Exception:  # noqa: BLE001
             continue
         for trace in items:

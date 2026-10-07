@@ -18,7 +18,9 @@ Results show up in four places:
 1. **A sidebar dashboard** (admins only) with four tabs:
    - **Last report:** a summary, type tiles and filters (minimum severity, confidence, show None), a timeline of the downtime colored by severity, and a searchable list of findings. Each finding expands to show its severity and why, a selector to rate the automation, the condition check, before/after values, due times and the step a run stopped at, with links to the automation's editor and traces (Ctrl/middle-click opens a new tab). The dashboard remembers where you were when you come back from the editor.
    - **History:** every restart, with a duration chart. Click an entry to open its full report.
-   - **Live status:** heartbeat health, what's running right now (what *would* be interrupted if HA stopped this instant), and a button to create the severity labels.
+   - **Live status:** heartbeat health, what's running right now (what *would* be interrupted if HA stopped this instant, with how long it has been running and the step it's on; it updates as soon as an automation or script starts or finishes), and a button to create the severity labels.
+
+   Right after a restart, the dashboard shows when the new report will be ready (it waits for the *startup settle delay* first), and updates by itself when it arrives. If the integration was updated while the page was open, it asks you to reload.
    - **What-if:** pick any time window and see which scheduled triggers a downtime then would miss.
 2. **Settings → Repairs:** one issue per finding at or above a minimum severity, the way Spook raises its issues. Previous issues are replaced by each new report. You can ignore them individually or clear them with a service.
 3. **Entities** (Watchman-style) on a *Downtime Auditor* device: one count sensor per finding type, with the findings in a `findings` attribute (excluded from the recorder), a highest-severity sensor, duration and timestamp sensors, and problem binary sensors.
@@ -102,6 +104,8 @@ Every finding has three separate attributes. They use the same words everywhere:
 ### Rating your automations
 
 On first setup Downtime Auditor creates five labels: `downtime_auditor_sev: critical`, `… high`, `… medium`, `… low` and `… none`. Add one to an automation (or a script, for its Interrupted findings) in its settings, or pick a rating from a finding's details on the dashboard. If several are attached, the highest wins. Unlabelled automations are **Medium**.
+
+A rating takes effect straight away, whether you set it on the dashboard or in Home Assistant's own label editor: the current report, its Repairs issues and the sensors are updated (for example, rating an automation None removes its Repair).
 
 If you delete the labels they stay deleted. Recreate the missing ones with the **Create severity labels** button on the dashboard's Live status tab, or the `downtime_auditor.create_severity_labels` service.
 
@@ -307,7 +311,12 @@ The tests run a real HA core. They cover:
 - condition checks against the baseline and against recorder history
 - entities, Repairs issues and their replacement, every websocket command (including path-traversal rejection)
 - sidebar panel registration and removal, the what-if service and the config flow
+- both trace-store layouts (before and after HA 2026.9), and the dashboard rendered in Node with a fixture from a real run
 
 The dashboard is a plain web component (`frontend/panel.js`, no build step) that talks to the `downtime_auditor/*` websocket commands.
 
-The icon shows as a broken image in Repairs and on the integration page until a brand icon is submitted to [home-assistant/brands](https://github.com/home-assistant/brands). This is normal for custom integrations.
+### Sandbox
+
+`scripts/dev/sandbox.sh demo` starts a throwaway Home Assistant (latest release) with demo automations, runs three simulated outages against your working tree, and leaves it at http://localhost:8124 (user `demo`, password `demo-sandbox`). `scripts/dev/screenshots.py` takes the README screenshots from it. See [scripts/dev/README.md](scripts/dev/README.md).
+
+On Home Assistant before 2026.3, the icon shows as a broken image in Repairs and on the integration page; 2026.3 and newer use the bundled brand images.

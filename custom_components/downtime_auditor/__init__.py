@@ -101,15 +101,15 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Start the auditor."""
+    from homeassistant.loader import async_get_integration
+
     auditor = DowntimeAuditor(hass, entry)
+    auditor.version = str((await async_get_integration(hass, DOMAIN)).version)
     hass.data[DOMAIN] = auditor
     await auditor.async_start()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     if auditor.opt(CONF_SIDEBAR_PANEL):
-        from homeassistant.loader import async_get_integration
-
-        version = str((await async_get_integration(hass, DOMAIN)).version)
-        await async_register_panel(hass, version)
+        await async_register_panel(hass, auditor.version)
     else:
         async_unregister_panel(hass)
     entry.async_on_unload(entry.add_update_listener(_async_reload))

@@ -1,0 +1,43 @@
+# Throwaway Home Assistant for trying Downtime Auditor (see scripts/dev/README.md).
+# Deliberately minimal: no default_config, so HA doesn't pull in dozens of integrations.
+homeassistant:
+  name: Sandbox Home
+  latitude: 34.05
+  longitude: -118.24
+  elevation: 90
+  unit_system: metric
+  time_zone: America/Los_Angeles
+  country: US
+  currency: USD
+
+http:
+  server_port: 8124
+
+frontend:
+config:
+repairs:
+recorder:
+  purge_keep_days: 7
+history:
+logbook:
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+
+input_boolean:
+  vacation_mode:
+    name: Vacation mode
+    icon: mdi:airplane
+  garage_door:
+    name: Garage door open
+    icon: mdi:garage
+  guest_mode:
+    name: Guest mode
+
+input_number:
+  freezer_temp:
+    name: Freezer temperature
+    min: -30
+    max: 10
+    step: 0.5
+    unit_of_measurement: "°C"

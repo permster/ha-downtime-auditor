@@ -354,7 +354,12 @@ class ConditionEvaluator:
         weekday = o.get("weekday")
         if ok and weekday is not None:
             ok = WEEKDAYS[local.weekday()] in as_list(weekday)
-        why = f"at {local.strftime('%a %H:%M:%S')}"
+        wanted = []
+        if o.get("after") is not None or o.get("before") is not None:
+            wanted.append(f"{after.strftime('%H:%M')}–{before.strftime('%H:%M')}")
+        if weekday is not None:
+            wanted.append("/".join(as_list(weekday)))
+        why = f"at {local.strftime('%a %H:%M:%S')}" + (f" (allowed {', '.join(wanted)})" if wanted else "")
         return self._step("time", PASS if ok else FAIL, why)
 
     def _c_sun(self, o: dict, when: datetime | None) -> dict:

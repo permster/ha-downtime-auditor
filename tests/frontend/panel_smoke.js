@@ -35,7 +35,7 @@ function makeEnv(storage) {
     window: { sessionStorage: storage, dispatchEvent() {}, ResizeObserver: undefined },
     history: { pushState() {} },
     CustomEvent: class { constructor(t, o) { this.type = t; this.detail = o?.detail; } },
-    setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
+    setInterval: () => 1, clearInterval() {}, setTimeout, clearTimeout,
     console, Date, JSON, Math, Object, String, Number, Boolean, Array, Set, encodeURIComponent,
   };
   vm.createContext(ctx);
@@ -179,6 +179,70 @@ const tick = () => new Promise((r) => setImmediate(r));
   p3.hass = hass;
   for (let i = 0; i < 5; i++) await tick();
   assert(p3.shadowRoot.innerHTML.includes("Highest severity"), "renders without storage");
+
+  // ---- 0.5.1: stale-page banner, pending analysis, live status, dense timeline
+  {
+    const statusFor = (extra) => ({ ...fixture.status, ...extra });
+    let status = statusFor({ version: "9.9.9" });
+    const env = makeEnv(memoryStorage());
+    const send = env.hass.connection.sendMessagePromise;
+    let statusCalls = 0;
+    // A frequent trigger (every 15 s over the window): only the first 200 due times are stored.
+    const dense = JSON.parse(JSON.stringify(fixture.report));
+    const freq = dense.findings.find((f) => f.occurrences?.length);
+    const t0 = new Date(dense.window.start).getTime();
+    freq.count = 481;
+    freq.occurrences_iso = Array.from({ length: 200 }, (_, i) => new Date(t0 + (i + 1) * 15000).toISOString());
+    env.hass.connection.sendMessagePromise = async (msg) => {
+      if (msg.type.endsWith("/status")) { statusCalls += 1; return status; }
+      if (msg.type.endsWith("/report")) return dense;
+      return send(msg);
+    };
+    const S = vm.runInContext("STATE", env.ctx);
+    const q = new env.Panel();
+    q.panel = { config: { version: "0.5.0" } }; // the version this page's code was loaded with
+    q.hass = env.hass;
+    for (let i = 0; i < 5; i++) await tick();
+    let page = q.shadowRoot.innerHTML;
+    assert(page.includes("was updated to 9.9.9") && page.includes('data-act="reload"'), "stale-page banner");
+    assert(page.includes('class="count">×481</text>'), "frequent trigger drawn as a span with its count");
+    const span = page.match(/<line x1="([\d.]+)" x2="([\d.]+)"[^>]*stroke-dasharray/);
+    const axisEnd = Number(page.match(/class="axis"/) && page.match(/<line x1="[\d.]+" x2="([\d.]+)" y1="\d+" y2="\d+" class="axis"/)[1]);
+    assert(span && Math.abs(Number(span[2]) - axisEnd) < 1, "a capped list runs to the window end, not halfway");
+
+    status = statusFor({ version: "0.5.0", tracking: false,
+      pending: { state: "settling", due_at: new Date(Date.now() + 42000).toISOString(), startup_delay: 90 } });
+    await q._loadStatus();
+    page = q.shadowRoot.innerHTML;
+    assert(!page.includes("was updated to"), "no stale banner when versions match");
+    assert(/Checking what was missed in <b>4[12] s<\/b>/.test(page), "pending countdown: " + page.match(/Checking[^<]*<b>[^<]*/)?.[0]);
+    assert(page.includes("The report below is from the previous restart."), "says the shown report is the old one");
+    status = statusFor({ version: "0.5.0", tracking: false, pending: { state: "starting", due_at: null, startup_delay: 90 } });
+    await q._loadStatus();
+    assert(q.shadowRoot.innerHTML.includes("Home Assistant is still starting"), "starting banner");
+
+    // Live status: elapsed time + step, and a refresh as soon as a run starts.
+    status = statusFor({ version: "0.5.0", pending: null, running_now: [{
+      entity_id: "automation.wake_up_routine", name: "Wake-up routine", domain: "automation", item_id: "wake_up",
+      mode: "parallel", current_runs: 1,
+      runs: [{ last_step: "action/1", last_step_config: { delay: "00:20:00" },
+               timestamp: { start: new Date(Date.now() - 125000).toISOString() } }],
+    }] });
+    q._setTab("live"); // like a click: records what's running now
+    await q._loadStatus();
+    page = q.shadowRoot.innerHTML;
+    assert(/running 2m [56]s · at action\/1 \(delay &quot;00:20:00&quot;\)/.test(page), "live elapsed: " + page.match(/running [^<]*/)?.[0]);
+    assert(page.includes('class="live-dot"'), "live indicator");
+    // The very first change after opening the tab must count (this was missed once).
+    const before = statusCalls;
+    q.hass = { ...env.hass, states: { "automation.wake_up_routine": { attributes: { current: 1 } } } };
+    await new Promise((r) => setTimeout(r, 300));
+    assert(statusCalls > before, "a run starting refreshes Live status right away");
+    const mid = statusCalls;
+    q.hass = { ...env.hass, states: { "automation.wake_up_routine": { attributes: { current: 1 } } } };
+    await new Promise((r) => setTimeout(r, 300));
+    assert(statusCalls === mid, "unrelated updates don't refetch");
+  }
 
   console.log("PANEL SMOKE OK");
 })().catch((e) => { console.error("PANEL SMOKE FAILED:", e.message); process.exit(1); });
