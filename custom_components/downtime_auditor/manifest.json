@@ -25,5 +25,5 @@
   "issue_tracker": "https://github.com/permster/ha-downtime-auditor/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.5.0"
+  "version": "0.5.1"
 }
