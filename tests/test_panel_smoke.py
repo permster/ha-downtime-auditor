@@ -33,12 +33,17 @@ NODE = shutil.which("node")
 async def test_panel_renders_real_reports(hass, enable_custom_integrations, hass_ws_client, tmp_path):
     shutil.rmtree(hass.config.path("downtime_auditor"), ignore_errors=True)
     await async_setup_component(hass, "input_boolean", {"input_boolean": {"vac": {}}})
-    t = (dt_util.now() - timedelta(hours=1)).strftime("%H:%M:%S")
+    missed = dt_util.now() - timedelta(hours=1)
+    t = missed.strftime("%H:%M:%S")
+    # A one-hour window starting 2 h after the missed time never contains it, at any time of day
+    # (a fixed "after 23:00" failed whenever the test ran shortly after midnight).
+    window = {"after": (missed + timedelta(hours=2)).strftime("%H:%M:%S"),
+              "before": (missed + timedelta(hours=3)).strftime("%H:%M:%S")}
     autos = [
         # Conditions that "probably failed" (vac is off in the baseline; the time part fails exactly)
         {"id": "a", "alias": "Morning", "triggers": [{"trigger": "time", "at": t}],
          "conditions": [{"or": [{"condition": "state", "entity_id": "input_boolean.vac", "state": "on"},
-                                {"condition": "time", "after": "23:00"}]}], "actions": []},
+                                {"condition": "time", **window}]}], "actions": []},
         # Unknown confidence, capped at Low
         # Two triggers: reported as ONE finding with both listed under it
         {"id": "b", "alias": "Evt", "triggers": [{"trigger": "event", "event_type": "x"},
