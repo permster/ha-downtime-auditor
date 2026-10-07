@@ -96,13 +96,13 @@ def main() -> None:
             shoot(page, out / "repairs.png")
             ctx.close()
 
-            # Mobile: the condition breakdown of a finding that probably failed its conditions.
+            # Mobile: an automation with several missed triggers, each with its own rating.
             ctx = browser.new_context(viewport=MOBILE, color_scheme="light", locale="en-US",
                                       device_scale_factor=1, is_mobile=True, has_touch=True)
             ctx.add_init_script(init)
             page = ctx.new_page()
             open_panel(page, f"{base}/downtime-auditor")
-            row = page.locator(".row-head", has_text="Night alarm arm").first
+            row = page.locator(".row-head", has_text="House check").first
             row.click()
             page.wait_for_timeout(300)
             row.evaluate("el => el.scrollIntoView({block: 'start'})")

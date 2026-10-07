@@ -33,15 +33,19 @@ from .snapshot import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Triggers that fire on a message/event: anything sent while HA was down is gone,
+# so there's no way to tell whether one was missed.
 LOST_MESSAGE_REASONS = {
     "event": "Events fired while Home Assistant was down are never delivered.",
-    "webhook": "Webhook calls made while Home Assistant was down were rejected/lost.",
-    "mqtt": "Non-retained MQTT messages published during downtime are lost; "
-    "retained ones are re-delivered on reconnect and may already have fired it.",
-    "tag": "Tag scans during downtime are lost.",
-    "conversation": "Voice/text commands during downtime are lost.",
-    "persistent_notification": "Notification events during downtime are lost.",
-    "geo_location": "Geo-location enter/leave events during downtime are lost.",
+    "webhook": "Webhook calls made while Home Assistant was down are lost.",
+    "mqtt": "MQTT messages sent while Home Assistant was down are lost "
+    "(retained ones are re-sent when it reconnects, which may simply run the automation then).",
+    "tag": "Tag scans while Home Assistant was down are lost.",
+    "conversation": "Voice and text commands while Home Assistant was down are lost.",
+    "device": "Device triggers that are presses or events (buttons, remotes) aren't recorded, "
+    "so any while Home Assistant was down are lost.",
+    "persistent_notification": "Notification events while Home Assistant was down are lost.",
+    "geo_location": "Geo-location enter/leave events while Home Assistant was down are lost.",
     "homeassistant": None,  # start/shutdown triggers are not "missed"
 }
 
@@ -726,7 +730,10 @@ class Analyzer:
                     f.summary = f"[{platform}] {f.summary}"
                 out.append(f)
             return out
-        reason = LOST_MESSAGE_REASONS.get(platform, f"'{platform}' triggers can't be reconstructed after the fact.")
+        reason = LOST_MESSAGE_REASONS.get(
+            platform,
+            f"'{platform}' triggers fire on messages or events; any while Home Assistant was down are lost.",
+        )
         if reason is None:
             return []
         details = {"reason": reason}

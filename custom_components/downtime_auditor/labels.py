@@ -13,7 +13,7 @@ from .severity import highest
 
 _LOGGER = logging.getLogger(__name__)
 
-LABEL_ICON = "mdi:timeline-alert-outline"
+LABEL_ICON = "mdi:timeline-check-outline"
 LABEL_DESCRIPTION = "Downtime Auditor severity for this automation."
 # Matched against HA's normalized label name (case-folded, spaces removed).
 _LABEL_RE = re.compile(rf"^{SEVERITY_LABEL_PREFIX}:(critical|high|medium|low|none)$")

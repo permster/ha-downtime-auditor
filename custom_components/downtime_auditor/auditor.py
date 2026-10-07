@@ -33,6 +33,7 @@ from .const import (
     CONF_REPAIRS,
     CONF_REPAIRS_MIN_SEVERITY,
     CONF_SHOW_SEVERITY_NONE,
+    CONF_UNCONFIRMABLE_SEVERITY,
     CONF_HISTORY_DAYS,
     CONF_REPORT_DAYS,
     CONF_SIDEBAR_PANEL,
@@ -49,6 +50,7 @@ from .const import (
     DEFAULT_REPAIRS_MIN_SEVERITY,
     DEFAULT_SEVERITY,
     DEFAULT_SHOW_SEVERITY_NONE,
+    DEFAULT_UNCONFIRMABLE_SEVERITY,
     DEFAULT_HISTORY_DAYS,
     DEFAULT_REPORT_DAYS,
     DEFAULT_SIDEBAR_PANEL,
@@ -62,6 +64,7 @@ from .const import (
     SIGNAL_REPORT_UPDATED,
     SEVERITY_SOURCE_DEFAULT,
     SEVERITY_SOURCE_LABEL,
+    SEVERITY_SOURCE_TRIGGER,
     STORAGE_KEY,
     STORAGE_VERSION,
     Confidence,
@@ -112,6 +115,7 @@ DEFAULTS = {
     CONF_REPAIRS_MIN_SEVERITY: DEFAULT_REPAIRS_MIN_SEVERITY,
     CONF_PUSH_MIN_SEVERITY: DEFAULT_PUSH_MIN_SEVERITY,
     CONF_SHOW_SEVERITY_NONE: DEFAULT_SHOW_SEVERITY_NONE,
+    CONF_UNCONFIRMABLE_SEVERITY: DEFAULT_UNCONFIRMABLE_SEVERITY,
 }
 
 SCHEDULE_PLATFORMS = {"time", "time_pattern", "sun", "calendar"}
@@ -169,6 +173,7 @@ class DowntimeAuditor:
             "last_report": self.last_report,
             "repair_issues": list(self.prev.get("repair_issues") or []),
             "labels_created": bool(self.prev.get("labels_created")),
+            "trigger_ratings": dict(self.prev.get("trigger_ratings") or {}),
         }
         await self._async_create_labels_once()
 
@@ -446,8 +451,23 @@ class DowntimeAuditor:
         return report
 
     @staticmethod
-    def _base_severity(lookup: SeverityLookup, entity_id: str) -> tuple[Severity, str]:
-        """How much an automation/script matters before any capping: its label, else Medium."""
+    def trigger_key(f: Any) -> str | None:
+        """Stable key for one trigger of one automation (for per-trigger ratings).
+
+        The trigger's `id:` if it has one, else its position and type. Works on Finding
+        objects and finding dicts alike.
+        """
+        get = f.get if isinstance(f, dict) else lambda k: getattr(f, k, None)
+        if get("type") != FindingType.MISSED or (get("trigger_id") is None and get("trigger_index") is None):
+            return None
+        which = f"id:{get('trigger_id')}" if get("trigger_id") is not None else f"#{get('trigger_index')}:{get('platform')}"
+        return f"{get('item_id') or get('entity_id')}|{which}"
+
+    def _base_severity(self, lookup: SeverityLookup, f: Any) -> tuple[Severity, str]:
+        """How much it matters before any capping: this trigger's rating, the automation's label, else Medium."""
+        if (key := self.trigger_key(f)) and (rated := (self.data.get("trigger_ratings") or {}).get(key)):
+            return Severity(rated), SEVERITY_SOURCE_TRIGGER
+        entity_id = f["entity_id"] if isinstance(f, dict) else f.entity_id
         if (sev := lookup.get(entity_id)) is not None:
             return sev, SEVERITY_SOURCE_LABEL
         return DEFAULT_SEVERITY, SEVERITY_SOURCE_DEFAULT
@@ -456,15 +476,31 @@ class DowntimeAuditor:
         """Fill in each finding's effective severity."""
         lookup = SeverityLookup(self.hass)
         for f in findings:
-            base, source = self._base_severity(lookup, f.entity_id)
+            base, source = self._base_severity(lookup, f)
             f.severity, f.severity_reason = self._severity(base, source, f.type, f.confidence, f.details)
             f.severity_source = source
             f.severity_base = base.value
 
-    @staticmethod
-    def _severity(base: Severity, source: str, ftype: str, confidence: str, details: dict) -> tuple[Severity, str]:
+    async def async_set_trigger_severity(self, finding: dict, severity: Severity | None) -> str:
+        """Rate one trigger (None clears it); re-rates the current report."""
+        key = self.trigger_key(finding)
+        if key is None:
+            raise ValueError("only missed triggers can be rated individually")
+        ratings = self.data.setdefault("trigger_ratings", {})
+        if severity is None:
+            ratings.pop(key, None)
+        else:
+            ratings[key] = Severity(severity).value
+        await self.async_rerate_last_report()
+        if self.active:
+            await self.store.async_save(self.data)
+        return key
+
+    def _severity(self, base: Severity, source: str, ftype: str, confidence: str, details: dict) -> tuple[Severity, str]:
         cond = (details or {}).get("conditions") or {}
-        sev, reason = effective_severity(base, source, ftype, confidence, cond.get("result"))
+        sev, reason = effective_severity(
+            base, source, ftype, confidence, cond.get("result"), self.opt(CONF_UNCONFIRMABLE_SEVERITY)
+        )
         if cond.get("result") == "fail" and cond.get("why"):
             reason = f"{reason}: {cond['why']}"
         elif cond.get("likely") == "fail":
@@ -507,7 +543,7 @@ class DowntimeAuditor:
         lookup = SeverityLookup(self.hass)
         for group in rep.get("findings") or []:
             for f in group.get("triggers") or [group]:  # rate each trigger; groups are rebuilt below
-                base, source = self._base_severity(lookup, f["entity_id"])
+                base, source = self._base_severity(lookup, f)
                 sev, reason = self._severity(base, source, f["type"], f["confidence"], f.get("details") or {})
                 f.update(severity=sev.value, severity_source=source, severity_base=base.value, severity_reason=reason)
         refresh_summary(rep, self.opt(CONF_REPAIRS_MIN_SEVERITY))

@@ -51,6 +51,7 @@ function makeEnv(storage) {
         if (t === "status") return fixture.status;
         if (t === "what_if") return fixture.whatif;
         if (t === "set_severity") return { entity_id: msg.entity_id, severity: msg.severity };
+        if (t === "set_trigger_severity") return { key: `${msg.item_id}|#${msg.trigger_index}:${msg.platform}`, severity: msg.severity };
         if (t === "create_severity_labels") return { created: ["downtime_auditor_sev: none"] };
         throw new Error("unexpected " + msg.type);
       },
@@ -116,6 +117,11 @@ const tick = () => new Promise((r) => setImmediate(r));
   html = p.shadowRoot.innerHTML;
   assert(html.includes('<div class="k">Triggers (2)</div>'), "trigger list in the details");
   assert.strictEqual((html.match(/class="trig"/g) || []).length, 2, "both triggers listed");
+  assert.strictEqual((html.match(/data-rate-trigger=/g) || []).length, 2, "a rating selector per trigger");
+  assert(html.includes("Automation&#39;s rating") || html.includes("Automation's rating"), "default = automation's rating");
+  await p._rateTrigger({ entity_id: "automation.evt", item_id: "b", trigger_id: null, trigger_index: 1, platform: "event" }, "none");
+  const trig = sent.filter((m) => m.type.endsWith("set_trigger_severity")).pop();
+  assert.deepStrictEqual([trig.trigger_index, trig.platform, trig.severity], [1, "event", "none"], "trigger rating sent");
 
   // ---- filters
   STATE.minSeverity = "high";

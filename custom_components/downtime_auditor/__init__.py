@@ -7,7 +7,7 @@ import logging
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.util import dt as dt_util
@@ -113,6 +113,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         async_unregister_panel(hass)
     entry.async_on_unload(entry.add_update_listener(_async_reload))
+    if hass.state is CoreState.running:
+        # Options changed (the entry reloads): re-rate the current report with them.
+        hass.async_create_task(auditor.async_rerate_last_report())
     return True
 
 

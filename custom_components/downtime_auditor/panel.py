@@ -33,7 +33,7 @@ async def async_register_panel(hass: HomeAssistant, version: str) -> None:
         frontend_url_path=PANEL_URL,
         webcomponent_name=PANEL_COMPONENT,
         sidebar_title=NAME,
-        sidebar_icon="mdi:timeline-alert-outline",
+        sidebar_icon="mdi:timeline-check-outline",
         module_url=f"{PANEL_STATIC_URL}/panel.js?v={version}",
         require_admin=True,
         # The dashboard compares this with downtime_auditor/status to spot a stale page after an update.

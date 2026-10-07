@@ -16,27 +16,34 @@ jobs:
        with: { python-version: "3.13" }
      - id: v
        run: echo "new=$(python .github/scripts/bump_version.py ${{ inputs.bump }} ${{ inputs.prerelease }})" >> "$GITHUB_OUTPUT"
+     # Pending notes live in docs/release-notes/unreleased.md. A full release renames it to <version>.md
+     # in the release commit; a beta uses it but leaves it for the final release.
+     - if: ${{ !inputs.prerelease }}
+       run: |
+         if [ -s docs/release-notes/unreleased.md ]; then
+           git mv docs/release-notes/unreleased.md "docs/release-notes/${{ steps.v.outputs.new }}.md"
+         fi
      - run: |
          git config user.name "github-actions[bot]"
          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
          git commit -am "Release v${{ steps.v.outputs.new }}"
          git tag "v${{ steps.v.outputs.new }}"
          git push origin main "v${{ steps.v.outputs.new }}"
-     # Curated notes from docs/release-notes/<version>.md (a beta like 0.5.0b1 falls back to 0.5.0.md)
-     # go on top; GitHub's generated commit list follows. Without a notes file, only the generated list.
+     # Curated notes from docs/release-notes/<version>.md (a beta like 0.5.0b1 falls back to 0.5.0.md,
+     # then unreleased.md) go on top; GitHub's generated commit list follows. Without a notes file, only the generated list.
      - env:
          GH_TOKEN: "${{ github.token }}"
          VERSION: "${{ steps.v.outputs.new }}"
          PRERELEASE: "${{ inputs.prerelease && '--prerelease' || '' }}"
        run: |
          notes=""
-         for f in "docs/release-notes/${VERSION}.md" "docs/release-notes/${VERSION%%b*}.md"; do
+         for f in "docs/release-notes/${VERSION}.md" "docs/release-notes/${VERSION%%b*}.md" docs/release-notes/unreleased.md; do
            if [ -f "$f" ]; then notes="$f"; break; fi
          done
          if [ -n "$notes" ]; then
            echo "Using release notes from $notes"
            gh release create "v${VERSION}" --generate-notes --notes "$(cat "$notes")" $PRERELEASE
          else
-           echo "No docs/release-notes/${VERSION}.md; using generated notes only"
+           echo "No release notes file; using generated notes only"
            gh release create "v${VERSION}" --generate-notes $PRERELEASE
          fi

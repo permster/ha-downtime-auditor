@@ -61,7 +61,7 @@ async def test_labels_created_once(hass, enable_custom_integrations, hass_storag
     entry, auditor = await _setup(hass, "03:00:00")
     assert SEV_NAMES <= _names(hass)
     label = lr.async_get(hass).async_get_label_by_name("downtime_auditor_sev: critical")
-    assert (label.color, label.icon) == ("red", "mdi:timeline-alert-outline")
+    assert (label.color, label.icon) == ("red", "mdi:timeline-check-outline")
     assert hass_storage[STORAGE_KEY]["data"]["labels_created"] is True
 
     # The user deletes one; a reload (or restart) must not bring it back.

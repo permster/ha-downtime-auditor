@@ -153,7 +153,7 @@ class HighestSeveritySensor(_Base):
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = [s.value for s in Severity]
     _attr_translation_key = "highest_severity"
-    _attr_icon = "mdi:timeline-alert-outline"
+    _attr_icon = "mdi:timeline-check-outline"
 
     def __init__(self, auditor: Any, entry: ConfigEntry) -> None:
         super().__init__(auditor, entry, "highest_severity", "Highest severity")

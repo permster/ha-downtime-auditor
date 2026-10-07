@@ -13,6 +13,7 @@
           "push_min_severity": "Minimum severity for push",
           "push_only_on_findings": "Push only when something was found",
           "show_severity_none": "Show severity None in the dashboard",
+          "unconfirmable_severity": "Severity for triggers that can't be confirmed",
           "write_json": "Write JSON reports",
           "report_retention_days": "Keep detailed reports for",
           "history_retention_days": "Keep history summary for",
@@ -30,6 +31,7 @@
           "push_min_severity": "Only findings at this severity or higher trigger the phone push.",
           "push_only_on_findings": "Skip the phone push when nothing reached the minimum severity for push.",
           "show_severity_none": "Findings with no impact (conditions would have failed, or rated None) are hidden by default.",
+          "unconfirmable_severity": "Event, webhook, MQTT, tag, voice and device button/press triggers: anything sent while Home Assistant was down is lost, so whether one was missed can't be known. Low lists them; None hides them (even in Critical automations). A rating set for one trigger on the dashboard always wins.",
           "write_json": "Save reports under /config/downtime_auditor/ for the dashboard's History tab.",
           "report_retention_days": "Full reports are saved only for downtimes where something was found, and deleted after this many days (hard cap of 500 files).",
           "history_retention_days": "A one-line summary of every downtime, used by the History tab. Each line is about 0.5 KB.",
@@ -61,6 +63,7 @@
           "push_min_severity": "Minimum severity for push",
           "push_only_on_findings": "Push only when something was found",
           "show_severity_none": "Show severity None in the dashboard",
+          "unconfirmable_severity": "Severity for triggers that can't be confirmed",
           "write_json": "Write JSON reports",
           "report_retention_days": "Keep detailed reports for",
           "history_retention_days": "Keep history summary for",
@@ -78,6 +81,7 @@
           "push_min_severity": "Only findings at this severity or higher trigger the phone push.",
           "push_only_on_findings": "Skip the phone push when nothing reached the minimum severity for push.",
           "show_severity_none": "Findings with no impact (conditions would have failed, or rated None) are hidden by default.",
+          "unconfirmable_severity": "Event, webhook, MQTT, tag, voice and device button/press triggers: anything sent while Home Assistant was down is lost, so whether one was missed can't be known. Low lists them; None hides them (even in Critical automations). A rating set for one trigger on the dashboard always wins.",
           "write_json": "Save reports under /config/downtime_auditor/ for the dashboard's History tab.",
           "report_retention_days": "Full reports are saved only for downtimes where something was found, and deleted after this many days (hard cap of 500 files).",
           "history_retention_days": "A one-line summary of every downtime, used by the History tab. Each line is about 0.5 KB.",
@@ -162,6 +166,12 @@
         "high": "High",
         "medium": "Medium",
         "low": "Low"
+      }
+    },
+    "unconfirmable": {
+      "options": {
+        "low": "Low (listed, no Repairs by default)",
+        "none": "None (hidden)"
       }
     }
   }

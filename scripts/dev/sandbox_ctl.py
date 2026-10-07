@@ -320,7 +320,10 @@ async def cmd_options(*pairs: str) -> None:
     updates = {}
     for pair in pairs:
         key, _, value = pair.partition("=")
-        updates[key] = json.loads(value) if value[:1] in "[{\"0123456789tfn-" else value
+        try:
+            updates[key] = json.loads(value)  # numbers, true/false, lists
+        except ValueError:
+            updates[key] = value  # plain text, e.g. "none" or "high"
     async with aiohttp.ClientSession() as s:
         hdr = await _hdr(s)
         async with s.get(f"{BASE}/api/config/config_entries/entry", headers=hdr) as r:

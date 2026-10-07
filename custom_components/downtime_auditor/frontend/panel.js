@@ -29,7 +29,7 @@ const TABS = [
   { key: "live", label: "Live status", icon: "mdi:heart-pulse" },
   { key: "whatif", label: "What-if", icon: "mdi:flask-outline" },
 ];
-const SOURCE_TEXT = { label: "set by label", default: "unrated (default)" };
+const SOURCE_TEXT = { label: "set by label", default: "unrated (default)", trigger: "set for this trigger" };
 const DENSE_OCCURRENCES = 40; // more due times than this are drawn as a span on the timeline
 
 const esc = (v) =>
@@ -561,7 +561,7 @@ class DowntimeAuditorPanel extends HTMLElement {
   }
 
   // One trigger of a multi-trigger finding: its own severity, confidence and evidence.
-  _triggerItem(c) {
+  _triggerItem(c, canRate = false) {
     const sev = SEV[c.severity];
     const trig = c.trigger_id ? `trigger “${esc(c.trigger_id)}”` : c.trigger_index != null ? `trigger #${c.trigger_index}` : "";
     return `<div class="trig">
@@ -571,6 +571,7 @@ class DowntimeAuditorPanel extends HTMLElement {
         ${c.platform ? `<span class="tag">${esc(c.platform)}</span>` : ""}${trig ? `<span class="tag">${trig}</span>` : ""}
       </div>
       <div class="trig-sum">${esc(c.summary)}</div>
+      ${canRate ? this._triggerPicker(c) : ""}
       ${this._details(c, { nested: true })}
     </div>`;
   }
@@ -596,7 +597,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     }
     if (!nested && children.length > 1) {
       parts.push(`<div class="kv"><div class="k">Triggers (${children.length})</div>
-        <div class="v trig-list">${children.map((c) => this._triggerItem(c)).join("")}</div></div>`);
+        <div class="v trig-list">${children.map((c) => this._triggerItem(c, canRate)).join("")}</div></div>`);
       parts.push(`<details class="raw"><summary>Raw finding</summary><pre>${esc(JSON.stringify(f, null, 2))}</pre></details>`);
       return parts.join("");
     }
@@ -789,6 +790,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     on("select[data-act=min-severity]", "change", (el) => { STATE.minSeverity = el.value; this._render(); });
     on("input[data-act=show-none]", "change", (el) => { STATE.showNone = el.checked; this._render(); });
     on("select[data-rate]", "change", (el) => this._rate(el.dataset.rate, el.value || null));
+    on("select[data-rate-trigger]", "change", (el) => this._rateTrigger(JSON.parse(el.dataset.rateTrigger), el.value || null));
     const search = r.querySelector(".search");
     if (search) search.addEventListener("input", (ev) => {
       STATE.search = ev.target.value;
@@ -817,6 +819,32 @@ class DowntimeAuditorPanel extends HTMLElement {
   _toggle(list, key) {
     const i = list.indexOf(key);
     if (i >= 0) list.splice(i, 1); else list.push(key);
+  }
+
+  // Rate one trigger of an automation: overrides the automation's rating for that trigger only.
+  _triggerPicker(c) {
+    if (c.type !== "missed" || !String(c.entity_id || "").startsWith("automation.")) return "";
+    if (c.trigger_id == null && c.trigger_index == null) return "";
+    const which = { entity_id: c.entity_id, item_id: c.item_id ?? null, trigger_id: c.trigger_id ?? null,
+                    trigger_index: c.trigger_index ?? null, platform: c.platform ?? null };
+    const current = c.severity_source === "trigger" ? c.severity_base : "";
+    return `<label class="trig-rate">Rate this trigger
+      <select class="sev-select" data-rate-trigger="${esc(JSON.stringify(which))}" aria-label="Severity rating for this trigger">
+        <option value="" ${current ? "" : "selected"}>Automation's rating</option>
+        ${SEVERITIES.map((s) => `<option value="${s.key}" ${current === s.key ? "selected" : ""}>${s.label}</option>`).join("")}
+      </select></label>`;
+  }
+
+  async _rateTrigger(which, severity) {
+    try {
+      await this._ws("set_trigger_severity", { ...which, severity });
+      this._error = null;
+    } catch (e) {
+      this._error = e.message || String(e);
+    }
+    if (STATE.tab === "whatif" && STATE.whatif && STATE.wiStart && STATE.wiEnd) await this._runWhatIf();
+    else if (!STATE.viewingFile) await this._loadReport();
+    else this._render();
   }
 
   async _rate(entityId, severity) {
@@ -952,6 +980,7 @@ svg text.count { font-size: 10px; }
 .trig { border: 1px solid var(--da-line); border-radius: 8px; padding: 8px 10px; }
 .trig-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .trig-sum { margin: 4px 0 2px; overflow-wrap: anywhere; }
+.trig-rate { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; color: var(--da-muted); }
 .trig .kv { grid-template-columns: 100px 1fr; }
 .conf-inline { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--da-muted); }
 .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; vertical-align: 2px;

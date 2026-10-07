@@ -26,6 +26,10 @@ Settings: `DA_SANDBOX` (default `~/da-sandbox`), `DA_SANDBOX_PORT` (8124), `DA_S
 
 Needs: [`uv`](https://docs.astral.sh/uv/) (installs the right Python for the chosen HA version) and `curl`.
 
+## Brand images
+
+`brand.py` renders the icon and logo (`custom_components/downtime_auditor/brand/*.png`, light and dark, 1x and 2x) from the SVG in the script, with the same Playwright setup as the screenshots. Edit the SVG, run it, and check `scripts/dev/brand_preview.png`.
+
 ## Screenshots
 
 `screenshots.py` takes the four README images (`docs/*.png`) from the sandbox with Playwright, using your installed Edge, so there's no browser download. On Windows:

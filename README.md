@@ -109,6 +109,10 @@ Every finding has three separate attributes. They use the same words everywhere:
 
 On first setup Downtime Auditor creates five labels: `downtime_auditor_sev: critical`, `… high`, `… medium`, `… low` and `… none`. Add one to an automation (or a script, for its Interrupted findings) in its settings, or pick a rating from a finding's details on the dashboard. If several are attached, the highest wins. Unlabeled automations are **Medium**.
 
+**Rating one trigger.** An automation's triggers can matter differently: "events fired while Home Assistant was down are never delivered" is true after every restart and there's nothing to act on, while the same automation's time trigger may matter a lot. In a finding with several triggers, each trigger has its own **Rate this trigger** selector on the dashboard. A trigger rating overrides the automation's label for that trigger only, is kept by the integration (keyed by the trigger's `id:` if it has one, otherwise its position and type), and isn't capped. The finding takes its most severe trigger's rating.
+
+**Triggers that can't be confirmed** (event, webhook, MQTT, tag, conversation, and device triggers that are presses, like Aqara buttons) are Low by default. Set *Severity for triggers that can't be confirmed* to **None** in the options to hide them all, even in Critical automations. A rating set for one trigger still wins.
+
 A rating takes effect straight away, whether you set it on the dashboard or in Home Assistant's own label editor: the current report, its Repairs issues and the sensors are updated (for example, rating an automation None removes its Repair).
 
 If you delete the labels they stay deleted. Recreate the missing ones with the **Create severity labels** button on the dashboard's Live status tab, or the `downtime_auditor.create_severity_labels` service.
@@ -117,7 +121,7 @@ The rating is then adjusted per finding:
 
 - **Conditions would have failed** → None.
 - **Fired at startup**, or **Unknown confidence** → capped at Low.
-- **Critical is never capped**, except by failed conditions. A Critical automation with an event, webhook, MQTT, tag or conversation trigger therefore raises a Critical **Repair on every restart**, because a message could have been lost each time.
+- **Critical is never capped**, except by failed conditions. A Critical automation with an event, webhook, MQTT, tag or conversation trigger therefore raises a Critical **Repair on every restart**, because a message could have been lost each time. To avoid that, rate those triggers individually, or set *Severity for triggers that can't be confirmed* to None.
 
 Repairs, push and `binary_sensor.downtime_auditor_needs_attention` only consider findings at or above their minimum severity (see [Options](#options)).
 
@@ -215,6 +219,7 @@ content: >
 | Minimum severity for push | High | Installs upgraded from v0.4 start at Medium. |
 | Push only when something was found | on | Skip the push when nothing reached the minimum severity for push. |
 | Show severity None in the dashboard | off | The dashboard also has its own toggle. |
+| Severity for triggers that can't be confirmed | Low | Event, webhook, MQTT, tag, conversation and device press triggers. **None** hides them (even in Critical automations). A rating set for one trigger always wins. |
 | Write JSON reports | on | Saves reports under `/config/downtime_auditor/`. The History tab needs this. |
 | Keep detailed reports for | 30 days | A full report is saved only when a downtime had a finding worth keeping (not severity None, and not just unconfirmable event-style triggers). Older reports are deleted, with a hard cap of 500 files. |
 | Keep history summary for | 365 days | One line per downtime (about 0.5 KB each), including restarts where nothing was found. |

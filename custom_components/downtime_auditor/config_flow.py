@@ -21,6 +21,7 @@ from .const import (
     CONF_REPAIRS,
     CONF_REPAIRS_MIN_SEVERITY,
     CONF_SHOW_SEVERITY_NONE,
+    CONF_UNCONFIRMABLE_SEVERITY,
     CONF_HISTORY_DAYS,
     CONF_REPORT_DAYS,
     CONF_SIDEBAR_PANEL,
@@ -63,6 +64,13 @@ def _schema(values: dict[str, Any]) -> vol.Schema:
             vol.Required(CONF_PUSH_MIN_SEVERITY, default=d(CONF_PUSH_MIN_SEVERITY)): severities,
             vol.Required(CONF_PUSH_ONLY_ON_FINDINGS, default=d(CONF_PUSH_ONLY_ON_FINDINGS)): bool,
             vol.Required(CONF_SHOW_SEVERITY_NONE, default=d(CONF_SHOW_SEVERITY_NONE)): bool,
+            vol.Required(CONF_UNCONFIRMABLE_SEVERITY, default=d(CONF_UNCONFIRMABLE_SEVERITY)): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[Severity.LOW.value, Severity.NONE.value],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    translation_key="unconfirmable",
+                )
+            ),
             vol.Required(CONF_WRITE_JSON, default=d(CONF_WRITE_JSON)): bool,
             vol.Required(CONF_REPORT_DAYS, default=d(CONF_REPORT_DAYS)): vol.All(
                 num(1, 365, "d"), vol.Coerce(int)

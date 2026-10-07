@@ -32,3 +32,23 @@ jobs:
         run: |
           pip install "$(python -c 'import json, pathlib, homeassistant.components.frontend as f; print(json.loads((pathlib.Path(f.__file__).parent / "manifest.json").read_text())["requirements"][0])')"
       - run: pytest -q
+
+  # Notes for an upcoming release go in docs/release-notes/unreleased.md; the Release workflow
+  # renames it to <version>.md. A released version's notes file stays as it was released.
+  release-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Released notes are unchanged
+        run: |
+          bad=0
+          for f in docs/release-notes/[0-9]*.md; do
+            v=$(basename "$f" .md)
+            git cat-file -e "v$v:$f" 2>/dev/null || continue  # not released yet, or notes added after the release
+            if ! git diff --quiet "v$v" -- "$f"; then
+              echo "::error file=$f::v$v is already released; put new notes in docs/release-notes/unreleased.md"
+              bad=1
+            fi
+          done
+          exit $bad

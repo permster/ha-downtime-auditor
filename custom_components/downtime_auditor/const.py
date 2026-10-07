@@ -30,6 +30,8 @@ CONF_REPAIRS = "repairs"
 CONF_REPAIRS_MIN_SEVERITY = "repairs_min_severity"
 CONF_PUSH_MIN_SEVERITY = "push_min_severity"
 CONF_SHOW_SEVERITY_NONE = "show_severity_none"
+# Severity for triggers that can't be confirmed (event, webhook, MQTT, tag, conversation, ...): low | none
+CONF_UNCONFIRMABLE_SEVERITY = "unconfirmable_severity"
 
 # Options removed in config entry version 2 (dropped by async_migrate_entry).
 LEGACY_OPTIONS = ("repairs_possible", "include_unverifiable", "retention")
@@ -50,6 +52,7 @@ DEFAULT_REPAIRS = True
 DEFAULT_REPAIRS_MIN_SEVERITY = "high"
 DEFAULT_PUSH_MIN_SEVERITY = "high"
 DEFAULT_SHOW_SEVERITY_NONE = False
+DEFAULT_UNCONFIRMABLE_SEVERITY = "low"
 
 SIGNAL_REPORT_UPDATED = f"{DOMAIN}_report_updated"
 PANEL_URL = "downtime-auditor"
@@ -131,6 +134,7 @@ SEVERITY_COLORS = {
 DEFAULT_SEVERITY = Severity.MEDIUM
 
 SEVERITY_SOURCE_LABEL = "label"
+SEVERITY_SOURCE_TRIGGER = "trigger"  # rated for one trigger on the dashboard
 SEVERITY_SOURCE_DEFAULT = "default"
 
 SEVERITY_LABEL_PREFIX = "downtime_auditor_sev"

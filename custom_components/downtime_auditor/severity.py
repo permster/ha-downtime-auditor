@@ -9,6 +9,7 @@ from .const import (
     SEVERITY_LABELS,
     SEVERITY_RANK,
     SEVERITY_SOURCE_LABEL,
+    SEVERITY_SOURCE_TRIGGER,
     Confidence,
     FindingType,
     Severity,
@@ -47,14 +48,21 @@ def effective_severity(
     finding_type: str,
     confidence: str,
     conditions: str | None,
+    unconfirmable: str = Severity.LOW,
 ) -> tuple[Severity, str]:
     """Return (severity, reason) for one finding.
 
-    Critical is never capped; only failed conditions bring it down.
+    Precedence: failed conditions (None) > a rating set for this trigger (as is) >
+    the "can't be confirmed" option set to None > Critical (never capped) > caps.
+    `unconfirmable` is that option: Low (cap Unknown-confidence triggers at Low) or None.
     """
-    why_base = "set by label" if source == SEVERITY_SOURCE_LABEL else "default for unrated automations"
     if conditions == "fail":
         return Severity.NONE, "conditions would not have passed"
+    if source == SEVERITY_SOURCE_TRIGGER:
+        return base, "set for this trigger"
+    why_base = "set by label" if source == SEVERITY_SOURCE_LABEL else "default for unrated automations"
+    if confidence == Confidence.UNKNOWN and unconfirmable == Severity.NONE:
+        return Severity.NONE, "can't be confirmed, and the integration's options set those to None"
     if base == Severity.CRITICAL:
         return base, why_base
     if finding_type == FindingType.FIRED_AT_STARTUP and rank(base) > rank(Severity.LOW):

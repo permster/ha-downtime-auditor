@@ -44,6 +44,7 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_history)
     websocket_api.async_register_command(hass, ws_what_if)
     websocket_api.async_register_command(hass, ws_set_severity)
+    websocket_api.async_register_command(hass, ws_set_trigger_severity)
     websocket_api.async_register_command(hass, ws_create_severity_labels)
 
 
@@ -179,6 +180,37 @@ async def ws_set_severity(hass: HomeAssistant, connection: websocket_api.ActiveC
     if (auditor := _auditor(hass)) is not None:
         await auditor.async_rerate_last_report()
     connection.send_result(msg["id"], {"entity_id": msg["entity_id"], "severity": msg["severity"]})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_trigger_severity",
+        vol.Required("entity_id"): vol.All(cv.entity_id, cv.entity_domain("automation")),
+        vol.Optional("item_id"): vol.Any(None, str),
+        vol.Optional("trigger_id"): vol.Any(None, str),
+        vol.Optional("trigger_index"): vol.Any(None, int),
+        vol.Optional("platform"): vol.Any(None, str),
+        vol.Required("severity"): vol.Any(None, vol.In([s.value for s in Severity])),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_set_trigger_severity(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Rate one trigger of an automation (overrides its label for that trigger; null clears it)."""
+    auditor = _auditor(hass)
+    if auditor is None:
+        connection.send_error(msg["id"], "not_loaded", "Downtime Auditor is not set up")
+        return
+    finding = {k: msg.get(k) for k in ("entity_id", "item_id", "trigger_id", "trigger_index", "platform")}
+    finding["type"] = "missed"
+    try:
+        key = await auditor.async_set_trigger_severity(finding, Severity(msg["severity"]) if msg["severity"] else None)
+    except ValueError as err:
+        connection.send_error(msg["id"], "invalid_format", str(err))
+        return
+    connection.send_result(msg["id"], {"key": key, "severity": msg["severity"]})
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/create_severity_labels"})
