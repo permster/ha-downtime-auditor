@@ -80,6 +80,9 @@ def cmd_automations() -> None:
                       {"trigger": "state", "entity_id": ["input_boolean.garage_door", "input_number.freezer_temp"]},
                       {"trigger": "event", "event_type": "house_check"}],
          "actions": []},
+        # Sun trigger: HA 2026.9+ stores its fields under `options` (see the what-if over 24 h).
+        {"id": "porch_sunset", "alias": "Porch light at sunset",
+         "triggers": [{"trigger": "sun", "event": "sunset", "offset": "-00:15:00"}], "actions": []},
         # A "slow integration": sensor.pool_pump only exists while ctl sets it through the REST
         # API, so after a restart it's missing until `ctl late-report` brings it back.
         {"id": "pool_on", "alias": "Pool pump started",

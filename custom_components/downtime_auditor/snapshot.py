@@ -36,14 +36,25 @@ def automation_entities(hass: HomeAssistant) -> list[Any]:
 
 
 def trigger_configs(entity: Any) -> list[dict]:
-    """Validated trigger config for an automation (blueprints already expanded)."""
+    """Validated trigger config for an automation (blueprints already expanded).
+
+    HA 2026.9+ keeps the fields of integration-provided triggers (sun, zone, ...)
+    under `options`; they're lifted to the top level so every HA version reads the same.
+    """
     confs = getattr(entity, "_trigger_config", None)
     if confs is None:
         raw = getattr(entity, "raw_config", None) or {}
         confs = raw.get("triggers") or raw.get("trigger") or []
         if isinstance(confs, dict):
             confs = [confs]
-    return [c for c in confs if isinstance(c, dict)]
+    out = []
+    for conf in confs:
+        if not isinstance(conf, dict):
+            continue
+        if isinstance(opts := conf.get("options"), dict):
+            conf = {**{k: v for k, v in conf.items() if k != "options"}, **opts}
+        out.append(conf)
+    return out
 
 
 def trigger_platform(conf: dict) -> str:
@@ -148,7 +159,7 @@ def jsonable(value: Any) -> Any:
 
 
 def state_record(state: State | None, attributes: set[str]) -> dict | None:
-    """Minimal serialisable state record."""
+    """Minimal serializable state record."""
     if state is None:
         return None
     rec: dict[str, Any] = {

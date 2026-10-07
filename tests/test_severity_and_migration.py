@@ -229,7 +229,7 @@ async def test_migrate_v1_entry(hass, enable_custom_integrations):
         "startup_delay": 0,
         "write_json": False,
         "report_retention_days": 30,
-        # Upgraded installs keep v0.4 behaviour: unrated (Medium) findings still raise Repairs/push.
+        # Upgraded installs keep v0.4 behavior: unrated (Medium) findings still raise Repairs/push.
         "repairs_min_severity": "medium",
         "push_min_severity": "medium",
     }
@@ -284,7 +284,7 @@ async def test_default_thresholds_skip_medium(hass, enable_custom_integrations):
     saved["session"]["shutdown_at"] = (dt_util.utcnow() - timedelta(hours=2)).isoformat()
     auditor.prev = saved
     auditor.started_at = dt_util.utcnow()
-    rep = await auditor._async_analyse_previous_downtime()
+    rep = await auditor._async_analyze_previous_downtime()
     await hass.async_block_till_done()
 
     assert [f["severity"] for f in rep["findings"]] == ["medium"]
@@ -322,7 +322,6 @@ async def test_upgrade_from_v04_end_to_end(hass, enable_custom_integrations, has
 
     from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
     from homeassistant.core import CoreState
     from homeassistant.helpers import label_registry as lr
 
@@ -408,9 +407,9 @@ async def test_upgrade_from_v04_end_to_end(hass, enable_custom_integrations, has
     assert hass_storage[STORAGE_KEY]["data"]["session"]["id"] == "v04"
 
     # HA finishes starting → first v0.5 report
-    hass.set_state(CoreState.running)
-    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
-    await hass.async_block_till_done()
+    from .common import fake_boot
+
+    await fake_boot(hass)  # start -> startup jobs -> running -> started, as a real boot
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
     await hass.async_block_till_done()
 

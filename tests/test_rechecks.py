@@ -56,7 +56,7 @@ async def _setup(hass):
         hass.states.async_set(eid, "unknown")
     await hass.async_block_till_done()
     auditor.started_at = dt_util.utcnow()
-    rep = await auditor._async_analyse_previous_downtime()
+    rep = await auditor._async_analyze_previous_downtime()
     await hass.async_block_till_done()
     return auditor, rep, push
 
@@ -98,7 +98,8 @@ async def test_unknown_entities_are_rechecked_not_reported(hass, enable_custom_i
     issues = [i for (d, _), i in ir.async_get(hass).issues.items() if d == DOMAIN]
     assert [i.translation_placeholders["name"] for i in issues] == ["Pump off to on"]
     assert len(push) == push_before + 1 and "Pump off to on" in push[-1].data["message"]
-    assert updates[-1].data["added"] == 1 and updates[-1].data["pending_checks"] == 1
+    # One update per entity that reported (in no fixed order); together they added one finding.
+    assert sum(u.data["added"] for u in updates) == 1 and updates[-1].data["pending_checks"] == 1
     base = Path(hass.config.path("downtime_auditor"))
     saved = json.loads((base / "last_report.json").read_text())
     assert saved["counts"]["missed"] == 1

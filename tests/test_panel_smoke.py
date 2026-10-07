@@ -60,7 +60,7 @@ async def test_panel_renders_real_reports(hass, enable_custom_integrations, hass
     saved["session"]["shutdown_at"] = (dt_util.utcnow() - timedelta(hours=2)).isoformat()
     auditor.prev = saved
     auditor.started_at = dt_util.utcnow()
-    report = await auditor._async_analyse_previous_downtime()
+    report = await auditor._async_analyze_previous_downtime()
     whatif = await auditor.async_analyze_window(dt_util.utcnow() - timedelta(hours=3), dt_util.utcnow(), False)
 
     # Add a v0.4 history line so the History tab shows a legacy entry too.

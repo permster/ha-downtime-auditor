@@ -86,11 +86,16 @@ async def test_multi_trigger_automation_is_one_finding_and_one_repair(hass, enab
     await auditor._async_on_shutdown()
     saved = copy.deepcopy(auditor.data)
     saved["session"]["shutdown_at"] = (dt_util.utcnow() - timedelta(hours=2)).isoformat()
+    # All three changed "during the downtime". HA is really running in the test, so keep the
+    # automation off meanwhile: a run now would look like it covered the missed time trigger.
+    await hass.services.async_call("automation", "turn_off", {"entity_id": "automation.pool_schedule"}, blocking=True)
     for eid in ("sensor.pump", "switch.pool", "switch.spa"):
-        hass.states.async_set(eid, "on")  # all three changed "during the downtime"
+        hass.states.async_set(eid, "on")
+    await hass.async_block_till_done()
+    await hass.services.async_call("automation", "turn_on", {"entity_id": "automation.pool_schedule"}, blocking=True)
     auditor.prev = saved
     auditor.started_at = dt_util.utcnow()
-    rep = await auditor._async_analyse_previous_downtime()
+    rep = await auditor._async_analyze_previous_downtime()
     await hass.async_block_till_done()
 
     (finding,) = [f for f in rep["findings"] if f["entity_id"] == "automation.pool_schedule"]

@@ -125,6 +125,7 @@ class Analyzer:
         self._pending_calendar: list[dict] = []
         self.skipped: list[str] = []  # automations that were off; counted, not reported
         self.deferred: list[dict] = []  # triggers whose entity hadn't reported yet (re-checked later)
+        self.errors: list[dict] = []  # triggers we couldn't analyze (shown apart, not as findings)
 
     # ------------------------------------------------------------------ helpers
 
@@ -167,17 +168,26 @@ class Analyzer:
             try:
                 findings.extend(self._analyze_automation(ent, entity_id, startup_triggered))
             except Exception as err:  # noqa: BLE001
-                _LOGGER.exception("Failed analysing %s", entity_id)
-                findings.append(
-                    Finding(
-                        FindingType.MISSED,
-                        Confidence.UNKNOWN,
-                        entity_id,
-                        entity_id,
-                        f"Analysis error: {err}",
-                    )
-                )
+                _LOGGER.exception("Failed analyzing %s", entity_id)
+                self._error({"entity_id": entity_id, "name": entity_id}, None, err)
         return findings
+
+    def _error(self, ctx: dict, idx: int | None, err: Exception | str) -> None:
+        """A trigger we couldn't analyze is our problem, not a missed trigger: listed apart."""
+        self.errors.append(
+            {
+                "automation": ctx["entity_id"],
+                "name": ctx.get("name") or ctx["entity_id"],
+                "trigger_index": idx,
+                "platform": ctx.get("platform"),
+                "error": str(err),
+            }
+        )
+        _LOGGER.warning(
+            "Couldn't analyze %s trigger #%s (%s): %s. Please report this at "
+            "https://github.com/permster/ha-downtime-auditor/issues",
+            ctx["entity_id"], idx, ctx.get("platform"), err,
+        )
 
     def _analyze_automation(
         self, ent: Any, entity_id: str, startup_triggered: dict[str, list[dict]]
@@ -215,8 +225,8 @@ class Analyzer:
             try:
                 results = handler(ctx) if handler else self._t_generic(ctx)
             except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Trigger analysis failed for %s #%s: %s", entity_id, idx, err)
-                results = [self._mk(ctx, FindingType.MISSED, Confidence.UNKNOWN, f"Could not analyse trigger: {err}")]
+                self._error(ctx, idx, err)
+                results = []
             out.extend(r for r in results if r is not None)
 
         if state is not None and state.state == "off":
@@ -439,7 +449,7 @@ class Analyzer:
                     return_response=True,
                 )
             except Exception as err:  # noqa: BLE001
-                out.append(self._mk(ctx, FindingType.MISSED, Confidence.UNKNOWN, f"Could not query {eid}: {err}"))
+                self._error(ctx, ctx["idx"], f"could not query {eid}: {err}")
                 continue
             occs: list[datetime] = []
             titles: list[str] = []

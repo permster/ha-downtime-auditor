@@ -39,7 +39,7 @@ Results show up in four places:
 | While running | Every *heartbeat* (default 60 s), it saves to `.storage`: the state of every entity your triggers reference, the current result of every template trigger, each automation's on/off state, and every automation or script run in progress (read from the trace system, including the current step and its delay or wait result). It also saves whenever an automation or script starts or finishes. |
 | Clean shutdown | A HA *shutdown job* runs **before** integrations and scripts are stopped. It takes a final snapshot, records the exact shutdown time, and then freezes the snapshot so HA cancelling those runs can't overwrite the record of what was interrupted. |
 | Crash or power loss | No shutdown job runs. The window start is the last heartbeat, and the report is marked **unclean**. If an automation's `last_triggered` shows it ran after the last heartbeat, it isn't reported as missed. |
-| Boot | It waits for `homeassistant_started` (the moment automations re-attach their triggers). It then waits the *startup settle delay* so integrations can restore real states, and analyses the window `[shutdown or last heartbeat → started]`. |
+| Boot | It waits for `homeassistant_started` (the moment automations re-attach their triggers). It then waits the *startup settle delay* so integrations can restore real states, and analyzes the window `[shutdown or last heartbeat → started]`. |
 
 ### Per-trigger logic
 
@@ -49,7 +49,7 @@ Results show up in four places:
 | `time_pattern` | Replicates HA's pattern and defaulting rules and counts the matches. | Confirmed |
 | `sun` | Sunrise/sunset (+offset) for each day in the window. | Confirmed |
 | `calendar` | Calls `calendar.get_events` for the window (+offset). | Confirmed |
-| `state` | Compares before vs. after, honouring `from`, `to`, `not_from`, `not_to` and `attribute`. | Confirmed; Probable with `for:` or when the change landed after startup; Possible with no baseline or an entity still `unavailable` |
+| `state` | Compares before vs. after, honoring `from`, `to`, `not_from`, `not_to` and `attribute`. | Confirmed; Probable with `for:` or when the change landed after startup; Possible with no baseline or an entity still `unavailable` |
 | `numeric_state` | Detects a crossing from outside the range to inside it. Supports `attribute`, `value_template` and entity thresholds. | Confirmed (Probable with `value_template`) |
 | `template` | Compares the stored result before downtime with the result now. False → true is a miss, because HA never fires a template trigger that is already true at startup. | Confirmed; Probable with `for:` |
 | `zone` | Enter/leave, based on the person/tracker state before and after. | Possible |
@@ -61,11 +61,13 @@ After an unclean stop, Confirmed becomes Probable (the window starts at the last
 
 Other details:
 
-- Blueprint automations are analysed with their inputs substituted.
+- Blueprint automations are analyzed with their inputs substituted.
 - Disabled triggers (`enabled: false`) and disabled conditions are skipped.
 - Automations that were **off** before the downtime (or, for what-if, are off now) are skipped. They're counted in the report, not listed.
 
 Entities that haven't reported yet after the restart (their integration is still connecting, so they're `unknown` or `unavailable`) aren't reported as missed: that says nothing about the trigger. Their triggers are **re-checked when the entity reports**, for up to 10 minutes. If the value came back unchanged, or Home Assistant fired the automation itself when it did, nothing is added. If it changed in a way Home Assistant won't act on (for example a `from: "off"` trigger, which doesn't fire on `unknown → on`), a finding is added to the report, with a Repairs issue and a follow-up push if it's severe enough. Entities that never report are listed once as *couldn't check*. While re-checks are pending, the report and dashboard say which entities they're waiting for.
+
+If Downtime Auditor itself can't analyze a trigger (a bug, or a Home Assistant change it doesn't handle yet), that trigger is listed once under *Couldn't analyze*, never as a missed trigger or a Repairs issue, and Home Assistant's log gets a warning with the details. Please report these.
 
 Known blind spots:
 
@@ -105,7 +107,7 @@ Every finding has three separate attributes. They use the same words everywhere:
 
 ### Rating your automations
 
-On first setup Downtime Auditor creates five labels: `downtime_auditor_sev: critical`, `… high`, `… medium`, `… low` and `… none`. Add one to an automation (or a script, for its Interrupted findings) in its settings, or pick a rating from a finding's details on the dashboard. If several are attached, the highest wins. Unlabelled automations are **Medium**.
+On first setup Downtime Auditor creates five labels: `downtime_auditor_sev: critical`, `… high`, `… medium`, `… low` and `… none`. Add one to an automation (or a script, for its Interrupted findings) in its settings, or pick a rating from a finding's details on the dashboard. If several are attached, the highest wins. Unlabeled automations are **Medium**.
 
 A rating takes effect straight away, whether you set it on the dashboard or in Home Assistant's own label editor: the current report, its Repairs issues and the sensors are updated (for example, rating an automation None removes its Repair).
 

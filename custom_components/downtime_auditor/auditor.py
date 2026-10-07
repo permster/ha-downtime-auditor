@@ -195,7 +195,7 @@ class DowntimeAuditor:
 
         if self.hass.state is CoreState.running:
             # Loaded after startup (fresh install or config-entry reload):
-            # automations never stopped, so there is no downtime to analyse.
+            # automations never stopped, so there is no downtime to analyze.
             _LOGGER.debug("Loaded while HA running; starting tracking without analysis")
             await self._async_activate(report=None)
         else:
@@ -297,14 +297,14 @@ class DowntimeAuditor:
     def _on_started(self, hass: HomeAssistant) -> None:
         self.started_at = dt_util.utcnow()
         delay = max(0, int(self.opt(CONF_STARTUP_DELAY)))
-        _LOGGER.debug("HA started; analysing in %ss", delay)
+        _LOGGER.debug("HA started; analyzing in %ss", delay)
         self._analysis_due = self.started_at + timedelta(seconds=delay)
         self._analysis_unsub = async_call_later(
             self.hass, delay, HassJob(self._async_run_startup_analysis, cancel_on_shutdown=True)
         )
 
     def pending(self) -> dict | None:
-        """While a restart is being analysed: what we're waiting for (for the dashboard)."""
+        """While a restart is being analyzed: what we're waiting for (for the dashboard)."""
         if self.active:
             return None
         if self.started_at is None:
@@ -319,7 +319,7 @@ class DowntimeAuditor:
         self._analysis_unsub = None
         report = None
         try:
-            report = await self._async_analyse_previous_downtime()
+            report = await self._async_analyze_previous_downtime()
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Downtime analysis failed")
         await self._async_activate(report)
@@ -395,10 +395,10 @@ class DowntimeAuditor:
         ents = automation_entities(self.hass)
         return len(ents), sum(len(trigger_configs(e)) for e in ents)
 
-    async def _async_analyse_previous_downtime(self) -> dict | None:
+    async def _async_analyze_previous_downtime(self) -> dict | None:
         prev_sess = self.prev.get("session")
         if not prev_sess:
-            _LOGGER.info("No previous session recorded (first run); nothing to analyse")
+            _LOGGER.info("No previous session recorded (first run); nothing to analyze")
             return None
         clean = bool(prev_sess.get("clean_shutdown"))
         start = _parse_dt(prev_sess.get("shutdown_at") if clean else prev_sess.get("last_heartbeat"))
@@ -427,7 +427,7 @@ class DowntimeAuditor:
             "ha_version_before": prev_sess.get("ha_version"),
             "ha_version_after": HA_VERSION,
             "ha_started_at": end.isoformat(),
-            "analysed_at": dt_util.utcnow().isoformat(),
+            "analyzed_at": dt_util.utcnow().isoformat(),
             "startup_delay_seconds": int(self.opt(CONF_STARTUP_DELAY)),
             "automations_checked": n_auto,
             "automations_skipped": len(analyzer.skipped),
@@ -435,6 +435,7 @@ class DowntimeAuditor:
             "baseline_available": bool(self.prev.get("baseline")),
             "baseline_captured_at": (self.prev.get("baseline") or {}).get("captured_at"),
             "window_truncated_to_days": max_days if truncated else None,
+            "analysis_errors": analyzer.errors,
         }
         report = build_report(window, findings, meta, self.opt(CONF_REPAIRS_MIN_SEVERITY))
         if analyzer.deferred:
@@ -781,6 +782,7 @@ class DowntimeAuditor:
                 "automations_checked": n_auto,
                 "automations_skipped": len(analyzer.skipped),
                 "triggers_checked": n_trig,
+                "analysis_errors": analyzer.errors,
                 "note": "Simulation: only time, time_pattern, sun and calendar triggers are evaluated; "
                 "conditions are checked against recorder history.",
                 "conditions_basis": source.basis,

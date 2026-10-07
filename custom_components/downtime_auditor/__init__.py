@@ -123,7 +123,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.version == 1:
         options = {k: v for k, v in entry.options.items() if k not in LEGACY_OPTIONS}
         data = {k: v for k, v in entry.data.items() if k not in LEGACY_OPTIONS}
-        # Every automation starts unrated (Medium). Keep v0.4's behaviour of raising
+        # Every automation starts unrated (Medium). Keep v0.4's behavior of raising
         # Repairs/push for ordinary findings until the user labels and raises these.
         options.setdefault(CONF_REPAIRS_MIN_SEVERITY, Severity.MEDIUM.value)
         options.setdefault(CONF_PUSH_MIN_SEVERITY, Severity.MEDIUM.value)

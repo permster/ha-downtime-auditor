@@ -34,7 +34,7 @@
           "report_retention_days": "Full reports are saved only for downtimes where something was found, and deleted after this many days (hard cap of 500 files).",
           "history_retention_days": "A one-line summary of every downtime, used by the History tab. Each line is about 0.5 KB.",
           "heartbeat_interval": "How often state is snapshotted to disk. Sets the accuracy of the window start after a crash or power loss.",
-          "startup_delay": "Wait this long after HA has started before analysing, so integrations can restore their real states.",
+          "startup_delay": "Wait this long after HA has started before analyzing, so integrations can restore their real states.",
           "include_scripts": "Also report scripts that were running when HA went down.",
           "max_window_days": "Cap on how far back to look after a long outage."
         }
@@ -82,7 +82,7 @@
           "report_retention_days": "Full reports are saved only for downtimes where something was found, and deleted after this many days (hard cap of 500 files).",
           "history_retention_days": "A one-line summary of every downtime, used by the History tab. Each line is about 0.5 KB.",
           "heartbeat_interval": "How often state is snapshotted to disk. Sets the accuracy of the window start after a crash or power loss.",
-          "startup_delay": "Wait this long after HA has started before analysing, so integrations can restore their real states.",
+          "startup_delay": "Wait this long after HA has started before analyzing, so integrations can restore their real states.",
           "include_scripts": "Also report scripts that were running when HA went down.",
           "max_window_days": "Cap on how far back to look after a long outage."
         }

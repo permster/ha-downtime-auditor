@@ -52,7 +52,7 @@ def _local(value: Any) -> str:
     return dt_util.as_local(dt).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _summarise(findings: list[dict[str, Any]], attention_min: str | None) -> dict[str, Any]:
+def _summarize(findings: list[dict[str, Any]], attention_min: str | None) -> dict[str, Any]:
     """Counts and severity roll-ups shared by new and upgraded reports."""
     counts = {t.value: 0 for t in FindingType}
     by_severity = {s.value: 0 for s in Severity}
@@ -147,7 +147,7 @@ def build_report(
     or above it. `actionable` is a deprecated alias of it (removed in v0.6.0).
     """
     items = group_findings([f.as_dict() for f in findings])
-    summary = _summarise(items, attention_min)
+    summary = _summarize(items, attention_min)
     return {
         "schema": REPORT_SCHEMA,
         "generated_at": dt_util.utcnow().isoformat(),
@@ -174,7 +174,7 @@ def build_report(
 def refresh_summary(report: dict[str, Any], attention_min: str) -> None:
     """Recompute groups, ordering and roll-ups after findings' severities changed."""
     report["findings"] = group_findings(report["findings"])
-    summary = _summarise(report["findings"], attention_min)
+    summary = _summarize(report["findings"], attention_min)
     report.update(summary, actionable=summary["needs_attention"])
 
 
@@ -258,6 +258,13 @@ def to_markdown(report: dict[str, Any], json_path: str | None) -> str:
             f"\n_Waiting for {len(ents)} entit{'y' if len(ents) == 1 else 'ies'} to report after the restart "
             f"({', '.join(ents[:10])}{' …' if len(ents) > 10 else ''}); their triggers are checked then, "
             "and the report is updated if anything was missed._"
+        )
+    if errors := meta.get("analysis_errors"):
+        names = sorted({e.get("name") or e["automation"] for e in errors})
+        lines.append(
+            f"\n_Couldn't analyze {len(errors)} trigger(s) ({', '.join(names[:10])}{' …' if len(names) > 10 else ''}). "
+            "This is a Downtime Auditor problem, not a missed trigger: please report it, with the warning "
+            "from the Home Assistant log._"
         )
     if unchecked := report.get("unchecked"):
         ents = sorted({u["entity"] for u in unchecked})
@@ -349,7 +356,7 @@ def upgrade_legacy(obj: Any) -> Any:
         out = dict(obj)
         if isinstance(obj.get("findings"), list):
             out["findings"] = group_findings(obj["findings"])
-            summary = _summarise(out["findings"], None)
+            summary = _summarize(out["findings"], None)
             del summary["needs_attention"]  # keep the recorded value; the threshold isn't known here
             out.update(summary)
         out["schema"] = REPORT_SCHEMA
@@ -368,7 +375,7 @@ def upgrade_legacy(obj: Any) -> Any:
         for f in obj["findings"]:
             category = f.get("category")
             if category not in LEGACY_TYPES:
-                continue  # 'skipped' (counted above) or anything unrecognised
+                continue  # 'skipped' (counted above) or anything unrecognized
             new = {k: v for k, v in f.items() if k != "category"}
             new["type"] = LEGACY_TYPES[category].value
             new["confidence"] = _legacy_confidence(f, clean).value
@@ -385,7 +392,7 @@ def upgrade_legacy(obj: Any) -> Any:
             findings.append(new)
         findings = group_findings(findings)
         out["findings"] = findings
-        out.update(_summarise(findings, None))
+        out.update(_summarize(findings, None))
         out["counts"] = counts  # keep the recorded totals
     else:  # a history line: no findings, so no severity
         out.update(counts=counts, counts_by_severity=None, highest_severity=None, needs_attention=None)

@@ -46,13 +46,13 @@ async def _setup(hass, t_missed):
     return entry, hass.data[DOMAIN]
 
 
-async def _analyse(hass, auditor):
+async def _analyze(hass, auditor):
     await auditor._async_on_shutdown()
     saved = copy.deepcopy(auditor.data)
     saved["session"]["shutdown_at"] = (dt_util.utcnow() - timedelta(hours=2)).isoformat()
     auditor.prev = saved
     auditor.started_at = dt_util.utcnow()
-    rep = await auditor._async_analyse_previous_downtime()
+    rep = await auditor._async_analyze_previous_downtime()
     await hass.async_block_till_done()
     return {f["entity_id"]: f for f in rep["findings"]}
 
@@ -107,7 +107,7 @@ async def test_labels_drive_severity(hass, enable_custom_integrations):
     )
     ents.async_update_entity("automation.evt", labels={_label_id(hass, "critical")})
 
-    by = await _analyse(hass, auditor)
+    by = await _analyze(hass, auditor)
     morning = by["automation.morning"]
     assert (morning["severity"], morning["severity_source"], morning["severity_reason"]) == (
         "high", "label", "set by label",
@@ -126,7 +126,7 @@ async def test_set_severity_websocket(hass, enable_custom_integrations, hass_ws_
     ents = er.async_get(hass)
     keep = lr.async_get(hass).async_create("Kitchen").label_id
     ents.async_update_entity("automation.morning", labels={keep, _label_id(hass, "low")})
-    by = await _analyse(hass, auditor)
+    by = await _analyze(hass, auditor)
     assert by["automation.morning"]["severity"] == "low"
 
     client = await hass_ws_client(hass)
@@ -179,7 +179,7 @@ async def test_label_changed_in_ha_rerates_report(hass, enable_custom_integratio
     ents = er.async_get(hass)
     ents.async_update_entity("automation.morning", labels={_label_id(hass, "high")})
     await hass.async_block_till_done()
-    by = await _analyse(hass, auditor)
+    by = await _analyze(hass, auditor)
     assert by["automation.morning"]["severity"] == "high"
     ours = lambda: [i for (d, _), i in ir.async_get(hass).issues.items() if d == DOMAIN]  # noqa: E731
     assert len(ours()) == 1  # High ≥ the default Repairs threshold
@@ -209,7 +209,6 @@ async def test_status_reports_pending_analysis_and_version(hass, enable_custom_i
     """The dashboard can say 'checking what was missed in N s' after a restart."""
     from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
     from homeassistant.core import CoreState
 
     hass.set_state(CoreState.not_running)
@@ -233,9 +232,9 @@ async def test_status_reports_pending_analysis_and_version(hass, enable_custom_i
     assert st["pending"] == {"state": "starting", "due_at": None, "startup_delay": 30}
     assert st["version"]  # the integration version, for the dashboard's reload check
 
-    hass.set_state(CoreState.running)
-    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
-    await hass.async_block_till_done()
+    from .common import fake_boot
+
+    await fake_boot(hass)  # start -> startup jobs -> running -> started, as a real boot
     st = await status()
     assert st["pending"]["state"] == "settling"
     due = dt_util.parse_datetime(st["pending"]["due_at"])

@@ -161,7 +161,7 @@ class DowntimeAuditorPanel extends HTMLElement {
       ]);
       this._unsub = () => unsubs.forEach((u) => u());
     } catch (e) { /* non-admin or older HA */ }
-    // Every 2 s: poll while a restart is being analysed (countdown), every 10 s on Live status,
+    // Every 2 s: poll while a restart is being analyzed (countdown), every 10 s on Live status,
     // and redraw Live status so "running for …" keeps counting.
     let ticks = 0;
     this._tick = setInterval(() => {
@@ -269,7 +269,7 @@ class DowntimeAuditorPanel extends HTMLElement {
       <button class="btn sm" data-act="reload">Reload</button></div>`;
   }
 
-  // A restart is being analysed: the report below is the previous one.
+  // A restart is being analyzed: the report below is the previous one.
   _pendingBanner() {
     const p = this._status?.pending;
     if (!p) return "";
@@ -396,6 +396,16 @@ class DowntimeAuditorPanel extends HTMLElement {
         <b>Waiting for ${pending.length} entit${pending.length === 1 ? "y" : "ies"} to report</b>
         <span class="muted">— they hadn't come back when this report was made. Their triggers are checked when they do${until ? ` (until ${esc(until)})` : ""};
         anything Home Assistant didn't act on is added here.</span></div><ul>${list(pending)}</ul></div>`;
+    }
+    const errors = rep.meta?.analysis_errors || [];
+    if (errors.length) {
+      out += `<div class="late"><div><ha-icon icon="mdi:bug-outline"></ha-icon>
+        <b>Couldn't analyze ${errors.length} trigger${errors.length === 1 ? "" : "s"}</b>
+        <span class="muted">— a Downtime Auditor problem, not a missed trigger.
+        <a href="https://github.com/permster/ha-downtime-auditor/issues" target="_blank" rel="noopener">Please report it</a>
+        with the warning from the Home Assistant log.</span></div>
+        <ul>${errors.map((e) => `<li>${esc(e.name || e.automation)} <span class="muted">— ${
+          e.trigger_index != null ? `trigger #${esc(e.trigger_index)}${e.platform ? ` (${esc(e.platform)})` : ""}: ` : ""}${esc(e.error)}</span></li>`).join("")}</ul></div>`;
     }
     if (unchecked.length) {
       out += `<div class="late"><div><ha-icon icon="mdi:help-circle-outline"></ha-icon>
@@ -746,7 +756,7 @@ class DowntimeAuditorPanel extends HTMLElement {
           <button class="chip-btn" data-preset="${toInput(now)}|${toInput(new Date(now.getTime() + 2 * 3600e3))}">Next 2 hours</button>
         </div>
       </div>
-      ${this._wiBusy ? `<div class="empty">Analysing…</div>` : STATE.whatif ? this._reportView(STATE.whatif, { whatIf: true }) : ""}`;
+      ${this._wiBusy ? `<div class="empty">Analyzing…</div>` : STATE.whatif ? this._reportView(STATE.whatif, { whatIf: true }) : ""}`;
   }
 
   // ---------------------------------------------------------------- events

@@ -15,7 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 
 LABEL_ICON = "mdi:timeline-alert-outline"
 LABEL_DESCRIPTION = "Downtime Auditor severity for this automation."
-# Matched against HA's normalised label name (case-folded, spaces removed).
+# Matched against HA's normalized label name (case-folded, spaces removed).
 _LABEL_RE = re.compile(rf"^{SEVERITY_LABEL_PREFIX}:(critical|high|medium|low|none)$")
 
 
@@ -51,7 +51,7 @@ def async_create_labels(hass: HomeAssistant) -> list[str]:
         name = label_name(sev)
         try:
             reg.async_create(name, color=SEVERITY_COLORS[sev], icon=LABEL_ICON, description=LABEL_DESCRIPTION)
-        except ValueError:  # name taken by a label we don't recognise; leave it alone
+        except ValueError:  # name taken by a label we don't recognize; leave it alone
             _LOGGER.warning("Could not create label %s: name already in use", name)
             continue
         created.append(name)
@@ -66,7 +66,7 @@ class SeverityLookup:
         self._entities = er.async_get(hass)
 
     def get(self, entity_id: str) -> Severity | None:
-        """Highest severity labelled on the entity, or None if unlabelled."""
+        """Highest severity labeled on the entity, or None if unlabeled."""
         entry = self._entities.async_get(entity_id)
         if entry is None or not self._labels:
             return None

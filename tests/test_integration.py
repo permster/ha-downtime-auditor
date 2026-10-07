@@ -1,4 +1,4 @@
-"""End-to-end: run HA, snapshot a clean shutdown, fake a 2h outage, analyse."""
+"""End-to-end: run HA, snapshot a clean shutdown, fake a 2h outage, analyze."""
 
 import asyncio
 import copy
@@ -104,7 +104,7 @@ async def test_full_restart_cycle(hass, enable_custom_integrations):
     new = DowntimeAuditor(hass, entry)
     new.prev = saved
     new.started_at = dt_util.utcnow()
-    report = await new._async_analyse_previous_downtime()
+    report = await new._async_analyze_previous_downtime()
     await hass.async_block_till_done()
 
     by = {}
@@ -187,7 +187,7 @@ async def test_unclean_uses_heartbeat_and_covered(hass, enable_custom_integratio
     new = DowntimeAuditor(hass, entry)
     new.prev = saved
     new.started_at = dt_util.utcnow() + timedelta(seconds=1)
-    report = await new._async_analyse_previous_downtime()
+    report = await new._async_analyze_previous_downtime()
     assert report["window"]["clean_shutdown"] is False
     cats = [f["type"] for f in report["findings"] if f["entity_id"] == "automation.morning"]
     assert cats == []  # covered by last_triggered
@@ -231,7 +231,7 @@ async def test_off_without_baseline_is_skipped(hass, enable_custom_integrations)
     new = DowntimeAuditor(hass, entry)
     new.prev = saved
     new.started_at = dt_util.utcnow()
-    report = await new._async_analyse_previous_downtime()
+    report = await new._async_analyze_previous_downtime()
     ids = {f["entity_id"] for f in report["findings"]}
     assert "automation.disabled" not in ids
     assert "automation.morning" in ids  # same trigger, but on: still reported
@@ -261,7 +261,6 @@ async def test_config_flow(hass, enable_custom_integrations):
 
 async def test_real_boot_path_and_shutdown_job(hass, enable_custom_integrations, hass_storage):
     """Boot with stored previous session -> report after HA 'started'; then real stop saves snapshot."""
-    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
     from homeassistant.core import CoreState
     from custom_components.downtime_auditor.const import STORAGE_KEY
 
@@ -293,9 +292,9 @@ async def test_real_boot_path_and_shutdown_job(hass, enable_custom_integrations,
     assert not auditor.active
 
     hass.states.async_set("binary_sensor.door", "on")  # changed "during downtime"
-    hass.set_state(CoreState.running)
-    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
-    await hass.async_block_till_done()
+    from .common import fake_boot
+
+    await fake_boot(hass)  # start -> startup jobs -> running -> started, as a real boot
     from pytest_homeassistant_custom_component.common import async_fire_time_changed
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
     await hass.async_block_till_done()
@@ -352,7 +351,7 @@ async def test_entities_repairs_and_websocket(hass, enable_custom_integrations, 
 
     auditor.prev = saved
     auditor.started_at = dt_util.utcnow()
-    await auditor._async_analyse_previous_downtime()
+    await auditor._async_analyze_previous_downtime()
     await hass.async_block_till_done()
 
     missed = hass.states.get("sensor.downtime_auditor_missed_triggers")
@@ -382,7 +381,7 @@ async def test_entities_repairs_and_websocket(hass, enable_custom_integrations, 
     auditor.prev["session"]["shutdown_at"] = (dt_util.utcnow() - timedelta(seconds=5)).isoformat()
     auditor.prev["session"]["clean_shutdown"] = True
     auditor.started_at = dt_util.utcnow()
-    await auditor._async_analyse_previous_downtime()
+    await auditor._async_analyze_previous_downtime()
     await hass.async_block_till_done()
     remaining = {iid for (d, iid) in reg.issues if d == DOMAIN}
     assert not (first_ids & remaining)

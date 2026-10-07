@@ -270,7 +270,7 @@ async def test_real_outage_conditions(hass, enable_custom_integrations):
     saved["session"]["shutdown_at"] = (dt_util.utcnow() - timedelta(hours=2)).isoformat()
     auditor.prev = saved
     auditor.started_at = dt_util.utcnow()
-    rep = await auditor._async_analyse_previous_downtime()
+    rep = await auditor._async_analyze_previous_downtime()
     await hass.async_block_till_done()
 
     by = {f["entity_id"]: f for f in rep["findings"]}
