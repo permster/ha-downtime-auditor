@@ -136,6 +136,7 @@ SEVERITY_SOURCE_DEFAULT = "default"
 SEVERITY_LABEL_PREFIX = "downtime_auditor_sev"
 
 EVENT_REPORT = f"{DOMAIN}_report"
+EVENT_REPORT_UPDATED = f"{DOMAIN}_report_updated"  # the last report changed after it was published
 PERSISTENT_NOTIFICATION_ID = f"{DOMAIN}_report"
 
 SERVICE_ANALYZE_WINDOW = "analyze_window"

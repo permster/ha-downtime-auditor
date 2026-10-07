@@ -106,6 +106,17 @@ const tick = () => new Promise((r) => setImmediate(r));
   html = p.shadowRoot.innerHTML;
   assert(/<option value="high" selected>High<\/option>/.test(html), "picker shows the label rating");
 
+  // ---- a multi-trigger automation is one row, with its triggers listed when expanded
+  const evt = fixture.report.findings.find((f) => f.name === "Evt");
+  assert.strictEqual(evt.triggers.length, 2);
+  assert(html.includes('<span class="tag">2 triggers</span>'), "multi-trigger tag");
+  assert.strictEqual((html.match(/<div class="row-title">Evt /g) || []).length, 1, "one row for the automation");
+  STATE.open.push(p._key(fixture.report, evt));
+  p._render();
+  html = p.shadowRoot.innerHTML;
+  assert(html.includes('<div class="k">Triggers (2)</div>'), "trigger list in the details");
+  assert.strictEqual((html.match(/class="trig"/g) || []).length, 2, "both triggers listed");
+
   // ---- filters
   STATE.minSeverity = "high";
   p._render();
@@ -191,8 +202,14 @@ const tick = () => new Promise((r) => setImmediate(r));
     const dense = JSON.parse(JSON.stringify(fixture.report));
     const freq = dense.findings.find((f) => f.occurrences?.length);
     const t0 = new Date(dense.window.start).getTime();
-    freq.count = 481;
-    freq.occurrences_iso = Array.from({ length: 200 }, (_, i) => new Date(t0 + (i + 1) * 15000).toISOString());
+    for (const target of [freq, ...(freq.triggers || [])]) { // the timeline draws each trigger
+      target.count = 481;
+      target.occurrences_iso = Array.from({ length: 200 }, (_, i) => new Date(t0 + (i + 1) * 15000).toISOString());
+    }
+    dense.pending_checks = [{ automation: "automation.pool", name: "Pool schedule", entity: "switch.pool", trigger_index: 0 },
+                            { automation: "automation.pool", name: "Pool schedule", entity: "switch.spa", trigger_index: 0 }];
+    dense.recheck_until = new Date(Date.now() + 600000).toISOString();
+    dense.unchecked = [{ automation: "automation.aux", name: "Aux", entity: "switch.aux", trigger_index: 0 }];
     env.hass.connection.sendMessagePromise = async (msg) => {
       if (msg.type.endsWith("/status")) { statusCalls += 1; return status; }
       if (msg.type.endsWith("/report")) return dense;
@@ -206,6 +223,8 @@ const tick = () => new Promise((r) => setImmediate(r));
     let page = q.shadowRoot.innerHTML;
     assert(page.includes("was updated to 9.9.9") && page.includes('data-act="reload"'), "stale-page banner");
     assert(page.includes('class="count">×481</text>'), "frequent trigger drawn as a span with its count");
+    assert(page.includes("Waiting for 2 entities to report") && page.includes("switch.spa"), "pending re-checks note");
+    assert(page.includes("Couldn't check 1 entity") && page.includes("switch.aux"), "unchecked note");
     const span = page.match(/<line x1="([\d.]+)" x2="([\d.]+)"[^>]*stroke-dasharray/);
     const axisEnd = Number(page.match(/class="axis"/) && page.match(/<line x1="[\d.]+" x2="([\d.]+)" y1="\d+" y2="\d+" class="axis"/)[1]);
     assert(span && Math.abs(Number(span[2]) - axisEnd) < 1, "a capped list runs to the window end, not halfway");

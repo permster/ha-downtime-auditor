@@ -22,7 +22,7 @@ Results show up in four places:
 
    Right after a restart, the dashboard shows when the new report will be ready (it waits for the *startup settle delay* first), and updates by itself when it arrives. If the integration was updated while the page was open, it asks you to reload.
    - **What-if:** pick any time window and see which scheduled triggers a downtime then would miss.
-2. **Settings → Repairs:** one issue per finding at or above a minimum severity, the way Spook raises its issues. Previous issues are replaced by each new report. You can ignore them individually or clear them with a service.
+2. **Settings → Repairs:** one issue per automation or script with a finding at or above a minimum severity (all its missed triggers are listed in the issue), the way Spook raises its issues. Previous issues are replaced by each new report. You can ignore them individually or clear them with a service.
 3. **Entities** (Watchman-style) on a *Downtime Auditor* device: one count sensor per finding type, with the findings in a `findings` attribute (excluded from the recorder), a highest-severity sensor, duration and timestamp sensors, and problem binary sensors.
 4. **JSON history** under `/config/downtime_auditor/` (see [History and retention](#history-and-retention)), plus an optional phone push. A persistent notification is also available but is off by default.
 
@@ -64,6 +64,8 @@ Other details:
 - Blueprint automations are analysed with their inputs substituted.
 - Disabled triggers (`enabled: false`) and disabled conditions are skipped.
 - Automations that were **off** before the downtime (or, for what-if, are off now) are skipped. They're counted in the report, not listed.
+
+Entities that haven't reported yet after the restart (their integration is still connecting, so they're `unknown` or `unavailable`) aren't reported as missed: that says nothing about the trigger. Their triggers are **re-checked when the entity reports**, for up to 10 minutes. If the value came back unchanged, or Home Assistant fired the automation itself when it did, nothing is added. If it changed in a way Home Assistant won't act on (for example a `from: "off"` trigger, which doesn't fire on `unknown → on`), a finding is added to the report, with a Repairs issue and a follow-up push if it's severe enough. Entities that never report are listed once as *couldn't check*. While re-checks are pending, the report and dashboard say which entities they're waiting for.
 
 Known blind spots:
 
@@ -174,7 +176,7 @@ All entities belong to the **Downtime Auditor** device.
 
 | Entity | State | Attributes |
 |---|---|---|
-| `sensor.downtime_auditor_interrupted_automations` | findings with severity Low or higher | `findings` (list), `window`, `report_generated`, `truncated` |
+| `sensor.downtime_auditor_interrupted_automations` | automations/scripts with a finding of severity Low or higher | `findings` (list), `window`, `report_generated`, `truncated` |
 | `sensor.downtime_auditor_missed_triggers` | same | same |
 | `sensor.downtime_auditor_fired_at_startup` | same | same |
 | `sensor.downtime_auditor_highest_severity` | `critical` / `high` / `medium` / `low` / `none` | |
@@ -185,7 +187,7 @@ All entities belong to the **Downtime Auditor** device.
 | `binary_sensor.downtime_auditor_needs_attention` | on if a finding is at or above *Minimum severity for Repairs* | |
 | `binary_sensor.downtime_auditor_last_shutdown_unclean` | on after a crash or power loss | |
 
-Each item in `findings` includes `name`, `entity_id`, `summary`, `severity`, `confidence`, `conditions`, `platform`, the trigger id or index, and, where relevant, `count` and `first_due`. All findings are listed (including severity None), most severe first, up to 50 per sensor. The attribute is excluded from the recorder so it doesn't bloat your database.
+There is one finding per automation (or script) and type: an automation with several missed triggers is one finding, with the triggers listed under it on the dashboard, in its Repairs issue and in the JSON report (`triggers`). Each item in `findings` includes `name`, `entity_id`, `summary`, `severity`, `confidence`, `conditions`, `platform`, the trigger id or index (or `triggers`: how many, when there are several), and, where relevant, `count` and `first_due`. All findings are listed (including severity None), most severe first, up to 50 per sensor. The attribute is excluded from the recorder so it doesn't bloat your database.
 
 Example Markdown card for your own dashboard:
 
@@ -204,7 +206,7 @@ content: >
 | Option | Default | Notes |
 |---|---|---|
 | Sidebar dashboard | on | Adds a *Downtime Auditor* entry to the sidebar (admins only). |
-| Create Repairs issues | on | One issue per finding at or above the minimum severity below. |
+| Create Repairs issues | on | One issue per automation with a finding at or above the minimum severity below. |
 | Minimum severity for Repairs | High | Also decides `needs_attention`. Installs upgraded from v0.4 start at Medium. |
 | Persistent notification | off | Posts the markdown report to the notification panel. |
 | Push notify service | blank | `notify.mobile_app_xxx`, or a script that accepts `title` and `message` variables. |
@@ -246,11 +248,13 @@ After every analysis it fires `downtime_auditor_report` with:
 | Key | Contents |
 |---|---|
 | `window` | start/end, duration, clean shutdown |
-| `counts` | per type: `interrupted`, `missed`, `fired_at_startup` |
+| `counts` | automations per type: `interrupted`, `missed`, `fired_at_startup` |
 | `counts_by_severity` | `critical`, `high`, `medium`, `low`, `none` |
 | `highest_severity` | the most severe finding, or `null` if there were none |
 | `needs_attention` | number of findings at or above *Minimum severity for Repairs* |
 | `skipped` | automations not checked because they were off |
+
+If the report changes later (entities that reported late, or a rating changed), `downtime_auditor_report_updated` fires with `generated_at`, `added`, `pending_checks`, `unchecked`, `counts`, `highest_severity` and `needs_attention`.
 | `json_path` | the saved report file, if any |
 | `actionable` | **deprecated**, same value as `needs_attention`; removed in v0.6.0 |
 

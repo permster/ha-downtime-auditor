@@ -64,6 +64,8 @@ def compact(finding: dict) -> dict:
         out["count"] = finding["count"]
     if finding.get("occurrences"):
         out["first_due"] = finding["occurrences"][0]
+    if len(finding.get("triggers") or []) > 1:
+        out["triggers"] = len(finding["triggers"])
     return out
 
 

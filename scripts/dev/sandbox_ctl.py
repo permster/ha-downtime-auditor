@@ -38,6 +38,7 @@ RATINGS = {
     "automation.freezer_too_warm": "critical",
     "automation.wake_up_routine": "high",
     "automation.doorbell_notification": "low",
+    "automation.house_check": "high",
     "automation.sensor_sync": "low",
     "script.bedtime_lights": "medium",
 }
@@ -73,6 +74,18 @@ def cmd_automations() -> None:
         {"id": "freezer_warm", "alias": "Freezer too warm",
          "triggers": [{"trigger": "numeric_state", "entity_id": "input_number.freezer_temp", "above": -10}],
          "actions": []},
+        # Several triggers in one automation: one finding (and one Repair) listing all three.
+        {"id": "house_check", "alias": "House check",
+         "triggers": [{"trigger": "time", "at": _hhmm(alarm)},
+                      {"trigger": "state", "entity_id": ["input_boolean.garage_door", "input_number.freezer_temp"]},
+                      {"trigger": "event", "event_type": "house_check"}],
+         "actions": []},
+        # A "slow integration": sensor.pool_pump only exists while ctl sets it through the REST
+        # API, so after a restart it's missing until `ctl late-report` brings it back.
+        {"id": "pool_on", "alias": "Pool pump started",
+         "triggers": [{"trigger": "state", "entity_id": "sensor.pool_pump", "to": "on"}], "actions": []},
+        {"id": "pool_from_off", "alias": "Pool pump off to on",
+         "triggers": [{"trigger": "state", "entity_id": "sensor.pool_pump", "from": "off", "to": "on"}], "actions": []},
         {"id": "doorbell", "alias": "Doorbell notification",
          "triggers": [{"trigger": "event", "event_type": "doorbell_pressed"}], "actions": []},
         {"id": "wake_up", "alias": "Wake-up routine", "mode": "parallel",
@@ -202,6 +215,18 @@ async def _call(session, service: str, data: dict | None = None) -> None:
             raise RuntimeError(f"{service}: {r.status} {await r.text()}")
 
 
+async def _set_state(session, entity_id: str, state: str) -> None:
+    async with session.post(f"{BASE}/api/states/{entity_id}", json={"state": state}, headers=await _hdr(session)) as r:
+        r.raise_for_status()
+
+
+async def cmd_late_report(state: str = "on") -> None:
+    """The slow 'integration' finally reports sensor.pool_pump (after a restart it's missing)."""
+    async with aiohttp.ClientSession() as s:
+        await _set_state(s, "sensor.pool_pump", state)
+    print(f"sensor.pool_pump reported '{state}'")
+
+
 async def cmd_call(service: str, data: str = "{}") -> None:
     async with aiohttp.ClientSession() as s:
         await _call(s, service, json.loads(data))
@@ -215,6 +240,7 @@ async def cmd_prepare() -> None:
         async with s.post(f"{BASE}/api/events/start_wakeup", json={}, headers=await _hdr(s)) as r:
             r.raise_for_status()
         await _call(s, "script.turn_on", {"entity_id": "script.bedtime_lights"})
+        await _set_state(s, "sensor.pool_pump", "off")
         await asyncio.sleep(2)
         await _call(s, "downtime_auditor.snapshot_now")
     print("prepared: vacation off, garage closed, freezer -18 °C, wake-up routine and bedtime script running")
@@ -257,6 +283,16 @@ def cmd_offline_changes() -> None:
         raise SystemExit(f"not in restore_state yet: {missing}")
     path.write_text(json.dumps(store, indent=2), encoding="utf-8")
     print("offline changes: garage door opened, freezer at -5 °C")
+
+
+async def cmd_report_id() -> None:
+    """generated_at of the current report (to wait for the next one exactly, not by the clock)."""
+    async with aiohttp.ClientSession() as s:
+        try:
+            (rep,) = await _ws(s, {"type": "downtime_auditor/report"})
+        except (aiohttp.ClientError, RuntimeError, AssertionError):
+            rep = None
+    print((rep or {}).get("generated_at") or "1970-01-01T00:00:00+00:00")
 
 
 async def cmd_wait_report(since: str, timeout: str = "180") -> None:
@@ -382,6 +418,8 @@ def cmd_base_requirements() -> None:
 
 COMMANDS = {
     "base-requirements": cmd_base_requirements,
+    "late-report": cmd_late_report,
+    "report-id": cmd_report_id,
     "wait-running": cmd_wait_running,
     "wait-tracking": cmd_wait_tracking,
     "tidy": cmd_tidy,

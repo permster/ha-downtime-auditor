@@ -124,6 +124,7 @@ class Analyzer:
         self.tz = dt_util.get_default_time_zone()
         self._pending_calendar: list[dict] = []
         self.skipped: list[str] = []  # automations that were off; counted, not reported
+        self.deferred: list[dict] = []  # triggers whose entity hadn't reported yet (re-checked later)
 
     # ------------------------------------------------------------------ helpers
 
@@ -222,6 +223,48 @@ class Analyzer:
             for f in out:
                 f.details["note"] = "Automation is currently turned off."
         return out
+
+    def recheck(self, pending: dict, startup_triggered: dict[str, list[dict]]) -> tuple[Finding | None, bool]:
+        """Re-run one deferred trigger now that its entity may have reported.
+
+        Returns (finding or None, still_unknown). Uses the same window and
+        pre-downtime values as the original analysis; "after" is the value now.
+        Counts as handled by HA if the automation triggered after the entity changed.
+        """
+        auto_id, target = pending["automation"], pending["entity"]
+        ent = next((e for e in automation_entities(self.hass) if getattr(e, "entity_id", None) == auto_id), None)
+        confs = trigger_configs(ent) if ent is not None else []
+        idx = pending["trigger_index"]
+        if idx >= len(confs):
+            return None, False  # automation removed or edited since
+        state = self.hass.states.get(auto_id)
+        target_state = self.hass.states.get(target)
+        last_triggered = _parse_dt(state.attributes.get("last_triggered")) if state else None
+        fired = bool(startup_triggered.get(auto_id)) or bool(
+            last_triggered and target_state and last_triggered >= target_state.last_changed
+        )
+        conf = confs[idx]
+        platform = trigger_platform(conf)
+        ctx = {
+            "entity_id": auto_id,
+            "name": pending.get("name") or auto_id,
+            "idx": idx,
+            "conf": conf,
+            "platform": platform,
+            "trigger_id": str(conf["id"]) if conf.get("id") is not None else None,
+            "last_triggered": last_triggered,
+            "fired_after_start": fired,
+            "item_id": getattr(ent, "unique_id", None),
+        }
+        handler = getattr(self, f"_t_{platform}", None) or self._t_generic
+        before = len(self.deferred)
+        results = [r for r in handler(ctx) if r is not None and (r.details or {}).get("entity") == target]
+        # A multi-entity trigger re-evaluates its other entities too; those are tracked already.
+        still_unknown = any(d["entity"] == target for d in self.deferred[before:])
+        del self.deferred[before:]
+        if results:
+            results[0].details["rechecked"] = True
+        return (results[0] if results else None), still_unknown
 
     def _mk(self, ctx: dict, finding_type: str, confidence: str, summary: str, **kw: Any) -> Finding:
         return Finding(
@@ -442,13 +485,21 @@ class Analyzer:
                 details=details,
             )
         if post_val in UNKNOWN_STATES and attribute is None:
-            return self._mk(
-                ctx,
-                FindingType.MISSED,
-                Confidence.POSSIBLE,
-                f"{target} is still '{post_val}' after startup (was '{pre_val}'); re-check once it reports.",
-                details=details,
+            # Its integration hasn't reported yet: that says nothing about the trigger.
+            # Re-checked once it reports (see DowntimeAuditor's pending checks).
+            self.deferred.append(
+                {
+                    "automation": ctx["entity_id"],
+                    "name": ctx["name"],
+                    "trigger_index": ctx["idx"],
+                    "trigger_id": ctx["trigger_id"],
+                    "platform": ctx["platform"],
+                    "entity": entity_id,
+                    "before": jsonable(pre_val),
+                    "state": post_val,
+                }
             )
+            return None
         if pre_val == post_val:
             return None  # unchanged (a change-and-change-back during downtime is undetectable)
 

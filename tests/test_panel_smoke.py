@@ -40,7 +40,9 @@ async def test_panel_renders_real_reports(hass, enable_custom_integrations, hass
          "conditions": [{"or": [{"condition": "state", "entity_id": "input_boolean.vac", "state": "on"},
                                 {"condition": "time", "after": "23:00"}]}], "actions": []},
         # Unknown confidence, capped at Low
-        {"id": "b", "alias": "Evt", "triggers": [{"trigger": "event", "event_type": "x"}], "actions": []},
+        # Two triggers: reported as ONE finding with both listed under it
+        {"id": "b", "alias": "Evt", "triggers": [{"trigger": "event", "event_type": "x"},
+                                                {"trigger": "event", "event_type": "y"}], "actions": []},
         # Rated High by label
         {"id": "c", "alias": "Pattern", "triggers": [{"trigger": "time_pattern", "minutes": "/30"}], "actions": []},
     ]
@@ -74,6 +76,7 @@ async def test_panel_renders_real_reports(hass, enable_custom_integrations, hass
     by = {f["name"]: f for f in report["findings"]}
     assert (by["Pattern"]["severity"], by["Morning"]["details"]["conditions"].get("likely")) == ("high", "fail")
     assert by["Evt"]["confidence"] == "unknown"
+    assert len(by["Evt"]["triggers"]) == 2
     assert [h.get("legacy", False) for h in history] == [False, True]
 
     fixture = tmp_path / "panel_fixture.json"

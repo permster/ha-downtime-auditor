@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts run in Linux/WSL: always LF, even on a Windows checkout (core.autocrlf)
+*.sh text eol=lf

@@ -147,13 +147,19 @@ class DowntimeAuditorPanel extends HTMLElement {
     this._loadStatus(false);
     await this._loadReport(STATE.viewingFile || undefined);
     if (STATE.tab === "history") this._loadHistory();
+    const onReport = () => {
+      if (!STATE.viewingFile) this._loadReport();
+      this._history = null;
+      if (STATE.tab === "history") this._loadHistory();
+      this._loadStatus(false);
+    };
     try {
-      this._unsub = await this._hass.connection.subscribeEvents(() => {
-        if (!STATE.viewingFile) this._loadReport();
-        this._history = null;
-        if (STATE.tab === "history") this._loadHistory();
-        this._loadStatus(false);
-      }, "downtime_auditor_report");
+      // A new report, and later changes to it (entities that reported late, re-rating).
+      const unsubs = await Promise.all([
+        this._hass.connection.subscribeEvents(onReport, "downtime_auditor_report"),
+        this._hass.connection.subscribeEvents(onReport, "downtime_auditor_report_updated"),
+      ]);
+      this._unsub = () => unsubs.forEach((u) => u());
     } catch (e) { /* non-admin or older HA */ }
     // Every 2 s: poll while a restart is being analysed (countdown), every 10 s on Live status,
     // and redraw Live status so "running for …" keeps counting.
@@ -300,7 +306,8 @@ class DowntimeAuditorPanel extends HTMLElement {
   _matches(f) {
     if (!STATE.search) return true;
     const q = STATE.search.toLowerCase();
-    return [f.name, f.entity_id, f.summary, f.platform, f.trigger_id, f.severity, f.confidence]
+    return [f.name, f.entity_id, f.summary, f.platform, f.trigger_id, f.severity, f.confidence,
+      ...(f.triggers || []).map((c) => c.summary)]
       .some((v) => String(v ?? "").toLowerCase().includes(q));
   }
 
@@ -367,12 +374,39 @@ class DowntimeAuditorPanel extends HTMLElement {
         ${shown.map((f) => this._row(f, this._key(rep, f), { canRate: !rep.legacy })).join("")}
         ${findings.length && !shown.length ? `<div class="empty">No findings match the current filter.</div>` : ""}
         ${skipped ? `<div class="foot muted">${esc(skipped)} automation(s) were turned off and were skipped.</div>` : ""}
+        ${this._lateChecks(rep)}
         ${whatIf ? `<div class="foot muted">What-if results are kept while this browser tab is open.</div>` : ""}
       </div>`;
   }
 
+  // Entities that hadn't reported when the report was built: re-checked when they do.
+  _lateChecks(rep) {
+    const byEntity = (items) => {
+      const m = new Map();
+      for (const p of items || []) m.set(p.entity, [...(m.get(p.entity) || []), p.name || p.automation]);
+      return [...m.entries()];
+    };
+    const pending = byEntity(rep.pending_checks), unchecked = byEntity(rep.unchecked);
+    const list = (entries) => entries.map(([e, autos]) =>
+      `<li><span class="mono">${esc(e)}</span> <span class="muted">— ${esc([...new Set(autos)].join(", "))}</span></li>`).join("");
+    let out = "";
+    if (pending.length) {
+      const until = rep.recheck_until ? new Date(rep.recheck_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null;
+      out += `<div class="late"><div><ha-icon icon="mdi:timer-sand"></ha-icon>
+        <b>Waiting for ${pending.length} entit${pending.length === 1 ? "y" : "ies"} to report</b>
+        <span class="muted">— they hadn't come back when this report was made. Their triggers are checked when they do${until ? ` (until ${esc(until)})` : ""};
+        anything Home Assistant didn't act on is added here.</span></div><ul>${list(pending)}</ul></div>`;
+    }
+    if (unchecked.length) {
+      out += `<div class="late"><div><ha-icon icon="mdi:help-circle-outline"></ha-icon>
+        <b>Couldn't check ${unchecked.length} entit${unchecked.length === 1 ? "y" : "ies"}</b>
+        <span class="muted">— no value after the restart, so their triggers couldn't be checked.</span></div><ul>${list(unchecked)}</ul></div>`;
+    }
+    return out;
+  }
+
   _key(rep, f) {
-    return [rep.generated_at, f.type, f.entity_id, f.trigger_index, f.platform, (f.summary || "").slice(0, 40)].join("|");
+    return [rep.generated_at, f.type, f.entity_id].join("|"); // one finding per automation and type
   }
 
   _filterBar(noneCount) {
@@ -410,7 +444,9 @@ class DowntimeAuditorPanel extends HTMLElement {
     const W = this._chartWidth(), H = 96, pad = 24, x = (t) => pad + ((t - t0) / (t1 - t0)) * (W - 2 * pad);
     const lanes = { interrupted: 24, missed: 46, fired_at_startup: 66 };
     const marks = [];
-    for (const f of findings) {
+    // Each trigger of a finding gets its own marks (and its own severity color).
+    const marked = findings.flatMap((g) => (g.triggers?.length ? g.triggers.map((c) => ({ ...c, name: g.name })) : [g]));
+    for (const f of marked) {
       const color = SEV[f.severity]?.color || "var(--da-sev-none)";
       const y = lanes[f.type] ?? 46;
       if (f.type === "interrupted") {
@@ -496,7 +532,7 @@ class DowntimeAuditorPanel extends HTMLElement {
           ${f.confidence && CONF[f.confidence] ? `<span class="tag conf" title="Confidence: ${esc(CONF[f.confidence].label)}">${this._meter(f.confidence)} ${esc(CONF[f.confidence].label)}</span>` : ""}
           ${cond.likely === "fail" ? `<span class="tag" title="${esc(cond.why)}">conditions?</span>` : ""}
           ${f.platform ? `<span class="tag">${esc(f.platform)}</span>` : ""}
-          ${trig ? `<span class="tag">${trig}</span>` : ""}
+          ${(f.triggers?.length || 0) > 1 ? `<span class="tag">${f.triggers.length} ${f.type === "missed" ? "triggers" : "items"}</span>` : trig ? `<span class="tag">${trig}</span>` : ""}
           <ha-icon icon="${open ? "mdi:chevron-up" : "mdi:chevron-down"}"></ha-icon>
         </div>
       </button>
@@ -514,10 +550,28 @@ class DowntimeAuditorPanel extends HTMLElement {
     </select>`;
   }
 
-  _details(f, { canRate = true } = {}) {
+  // One trigger of a multi-trigger finding: its own severity, confidence and evidence.
+  _triggerItem(c) {
+    const sev = SEV[c.severity];
+    const trig = c.trigger_id ? `trigger “${esc(c.trigger_id)}”` : c.trigger_index != null ? `trigger #${c.trigger_index}` : "";
+    return `<div class="trig">
+      <div class="trig-head">
+        ${sev ? `<span class="sev-badge" style="--s:${sev.color}">${sev.label}</span>` : ""}
+        ${c.confidence && CONF[c.confidence] ? `<span class="conf-inline">${this._meter(c.confidence)} ${esc(CONF[c.confidence].label)}</span>` : ""}
+        ${c.platform ? `<span class="tag">${esc(c.platform)}</span>` : ""}${trig ? `<span class="tag">${trig}</span>` : ""}
+      </div>
+      <div class="trig-sum">${esc(c.summary)}</div>
+      ${this._details(c, { nested: true })}
+    </div>`;
+  }
+
+  _details(f, { canRate = true, nested = false } = {}) {
     const d = f.details || {};
     const parts = [];
-    if (f.severity) {
+    const children = f.triggers || [];
+    if (nested) {
+      // severity/confidence are in the trigger's header
+    } else if (f.severity) {
       parts.push(`<div class="kv"><div class="k">Severity</div><div class="v sev-line">
         <span class="sev-badge" style="--s:${SEV[f.severity]?.color}">${esc(SEV[f.severity]?.label || f.severity)}</span>
         <span class="muted">${esc(f.severity_reason || SOURCE_TEXT[f.severity_source] || "")}</span></div></div>`);
@@ -526,8 +580,15 @@ class DowntimeAuditorPanel extends HTMLElement {
           <div class="v">${this._severityPicker(f)} <span class="muted small-inline">Saved as a <code>downtime_auditor_sev</code> label.</span></div></div>`);
       }
     }
-    if (f.confidence) {
-      parts.push(`<div class="kv"><div class="k">Confidence</div><div class="v">${this._meter(f.confidence)} ${esc(CONF[f.confidence]?.label || f.confidence)}</div></div>`);
+    if (f.confidence && !nested) {
+      parts.push(`<div class="kv"><div class="k">Confidence</div><div class="v">${this._meter(f.confidence)} ${esc(CONF[f.confidence]?.label || f.confidence)}${
+        children.length > 1 ? ` <span class="muted">(the most certain of its triggers)</span>` : ""}</div></div>`);
+    }
+    if (!nested && children.length > 1) {
+      parts.push(`<div class="kv"><div class="k">Triggers (${children.length})</div>
+        <div class="v trig-list">${children.map((c) => this._triggerItem(c)).join("")}</div></div>`);
+      parts.push(`<details class="raw"><summary>Raw finding</summary><pre>${esc(JSON.stringify(f, null, 2))}</pre></details>`);
+      return parts.join("");
     }
     if (d.conditions) parts.push(this._conditions(d.conditions));
     if (f.occurrences?.length) {
@@ -561,7 +622,7 @@ class DowntimeAuditorPanel extends HTMLElement {
         parts.push(`<div class="run">Fired ${esc(fmtTime(run.time))}${run.source ? ` — ${esc(run.source)}` : ""}</div>`);
       }
     }
-    parts.push(`<details class="raw"><summary>Raw finding</summary><pre>${esc(JSON.stringify(f, null, 2))}</pre></details>`);
+    if (!nested) parts.push(`<details class="raw"><summary>Raw finding</summary><pre>${esc(JSON.stringify(f, null, 2))}</pre></details>`);
     return parts.join("");
   }
 
@@ -873,6 +934,16 @@ svg text { fill: var(--da-muted); font-size: 11px; }
 .row-main { flex: 1; min-width: 0; }
 .row-title { font-weight: 500; font-size: 14px; overflow-wrap: anywhere; }
 svg text.count { font-size: 10px; }
+.late { margin-top: 12px; padding: 10px 12px; border: 1px dashed var(--da-line); border-radius: 8px; font-size: 13px; }
+.late ha-icon { --mdc-icon-size: 18px; vertical-align: -4px; margin-right: 4px; color: var(--da-muted); }
+.late ul { margin: 6px 0 0; padding-left: 22px; }
+.late li { margin: 2px 0; overflow-wrap: anywhere; }
+.trig-list { display: flex; flex-direction: column; gap: 8px; }
+.trig { border: 1px solid var(--da-line); border-radius: 8px; padding: 8px 10px; }
+.trig-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.trig-sum { margin: 4px 0 2px; overflow-wrap: anywhere; }
+.trig .kv { grid-template-columns: 100px 1fr; }
+.conf-inline { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--da-muted); }
 .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; vertical-align: 2px;
   background: var(--da-ok); box-shadow: 0 0 0 0 color-mix(in srgb, var(--da-ok) 60%, transparent); animation: da-pulse 2s infinite; }
 @keyframes da-pulse { 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }

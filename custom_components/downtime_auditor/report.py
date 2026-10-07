@@ -15,6 +15,7 @@ from homeassistant.util import dt as dt_util
 from .analyzer import Finding, Window
 from .const import (
     CONFIDENCE_LABELS,
+    CONFIDENCE_LEVEL,
     HISTORY_FILE,
     MAX_REPORT_FILES,
     NAME,
@@ -33,7 +34,7 @@ from .severity import at_least, effective_severity, highest, rank
 _LOGGER = logging.getLogger(__name__)
 REPORT_NAME_RE = re.compile(r"^report-(\d{8}-\d{6})(?:-\d+)?\.json$")
 
-REPORT_SCHEMA = 2
+REPORT_SCHEMA = 3  # 3: findings grouped per automation (v0.5.1); 2: one per trigger (v0.5.0)
 
 SECTION_ORDER = [
     (FindingType.INTERRUPTED, "Interrupted mid-run"),
@@ -72,6 +73,68 @@ def _summarise(findings: list[dict[str, Any]], attention_min: str | None) -> dic
     }
 
 
+def _confidence_level(value: Any) -> int:
+    return CONFIDENCE_LEVEL.get(value, 0)
+
+
+def _merge(children: list[dict[str, Any]]) -> dict[str, Any]:
+    """One entry for an automation/script: its triggers (or runs) are listed under `triggers`.
+
+    Group-level severity and reason come from the most severe trigger; confidence is
+    the most certain trigger's (how sure we are that *something* was missed).
+    """
+    children = sorted(
+        ({k: v for k, v in c.items() if k != "triggers"} for c in children),
+        key=lambda c: (-rank(c["severity"]), -_confidence_level(c.get("confidence"))),
+    )
+    top, n = children[0], len(children)
+    platforms = sorted({str(c["platform"]) for c in children if c.get("platform")})
+    group = {
+        "type": top["type"],
+        "entity_id": top["entity_id"],
+        "name": top["name"],
+        "item_id": top.get("item_id"),
+        "platform": ", ".join(platforms) or None,
+        "trigger_index": top.get("trigger_index") if n == 1 else None,
+        "trigger_id": top.get("trigger_id") if n == 1 else None,
+        "confidence": max((c.get("confidence") for c in children), key=_confidence_level),
+        "severity": top["severity"],
+        "severity_source": top.get("severity_source"),
+        "severity_base": top.get("severity_base"),
+        "severity_reason": top.get("severity_reason"),
+        "conditions": top.get("conditions"),
+        "summary": top["summary"],
+        "count": top.get("count"),
+        "occurrences": top.get("occurrences") or [],
+        "occurrences_iso": top.get("occurrences_iso") or [],
+        "details": top.get("details") or {},
+        "triggers": children,
+    }
+    if n > 1:
+        noun = "triggers" if top["type"] == FindingType.MISSED else "items"
+        group.update(
+            summary=f"{n} {noun}: " + "; ".join(c["summary"] for c in children[:2]) + (" …" if n > 2 else ""),
+            count=sum(int(c.get("count") or 1) for c in children),
+            occurrences=sorted({o for c in children for o in c.get("occurrences") or []})[:25],
+            occurrences_iso=sorted({o for c in children for o in c.get("occurrences_iso") or []})[:200],
+            details={},
+        )
+    return group
+
+
+def group_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One finding per (type, automation/script), most severe first.
+
+    Accepts flat per-trigger findings or already-grouped ones (regrouping is a no-op
+    apart from refreshing the group-level fields).
+    """
+    by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for f in findings:
+        for child in f.get("triggers") or [f]:
+            by_key.setdefault((f["type"], f["entity_id"]), []).append(child)
+    return sorted((_merge(c) for c in by_key.values()), key=lambda g: -rank(g["severity"]))
+
+
 def build_report(
     window: Window,
     findings: list[Finding],
@@ -83,7 +146,7 @@ def build_report(
     `attention_min` is the Repairs threshold; `needs_attention` counts findings at
     or above it. `actionable` is a deprecated alias of it (removed in v0.6.0).
     """
-    items = sorted((f.as_dict() for f in findings), key=lambda f: -rank(f["severity"]))
+    items = group_findings([f.as_dict() for f in findings])
     summary = _summarise(items, attention_min)
     return {
         "schema": REPORT_SCHEMA,
@@ -109,8 +172,8 @@ def build_report(
 
 
 def refresh_summary(report: dict[str, Any], attention_min: str) -> None:
-    """Recompute ordering and roll-ups after findings' severities changed."""
-    report["findings"].sort(key=lambda f: -rank(f["severity"]))
+    """Recompute groups, ordering and roll-ups after findings' severities changed."""
+    report["findings"] = group_findings(report["findings"])
     summary = _summarise(report["findings"], attention_min)
     report.update(summary, actionable=summary["needs_attention"])
 
@@ -161,6 +224,15 @@ def to_markdown(report: dict[str, Any], json_path: str | None) -> str:
                 f" [trigger #{i['trigger_index']}]" if i.get("trigger_index") is not None else ""
             )
             note = f" — _{i['details']['note']}_" if (i.get("details") or {}).get("note") else ""
+            triggers = i.get("triggers") or []
+            if len(triggers) > 1:
+                lines.append(f"- **{_badge(i)}** — **{i['name']}** (`{i['entity_id']}`): {len(triggers)} triggers")
+                for c in triggers[:5]:
+                    conf = CONFIDENCE_LABELS.get(c.get("confidence"), c.get("confidence"))
+                    lines.append(f"  - {c['summary']} _({conf})_")
+                if len(triggers) > 5:
+                    lines.append(f"  - … and {len(triggers) - 5} more")
+                continue
             lines.append(f"- **{_badge(i)}** — **{i['name']}** (`{i['entity_id']}`){tid}: {i['summary']}{note}")
         if len(full) > 40:
             lines.append(f"- … and {len(full) - 40} more (see JSON report)")
@@ -180,6 +252,19 @@ def to_markdown(report: dict[str, Any], json_path: str | None) -> str:
     skipped = report.get("skipped") or meta.get("automations_skipped") or 0
     if skipped:
         lines.append(f"\n_{skipped} automation(s) were turned off and were skipped._")
+    if pending := report.get("pending_checks"):
+        ents = sorted({p["entity"] for p in pending})
+        lines.append(
+            f"\n_Waiting for {len(ents)} entit{'y' if len(ents) == 1 else 'ies'} to report after the restart "
+            f"({', '.join(ents[:10])}{' …' if len(ents) > 10 else ''}); their triggers are checked then, "
+            "and the report is updated if anything was missed._"
+        )
+    if unchecked := report.get("unchecked"):
+        ents = sorted({u["entity"] for u in unchecked})
+        lines.append(
+            f"\n_Couldn't check {len(unchecked)} trigger(s): {', '.join(ents[:10])}{' …' if len(ents) > 10 else ''} "
+            "never reported a value after the restart._"
+        )
     lines.append(
         "\n_Conditions are checked where possible: against pre-downtime values after a real outage, "
         "against recorder history for what-if windows._"
@@ -250,9 +335,25 @@ def _legacy_confidence(finding: dict[str, Any], clean: bool) -> Confidence:
 
 
 def upgrade_legacy(obj: Any) -> Any:
-    """Read a v0.4 report or history line in v0.5 terms. Idempotent; never touches files."""
-    if not isinstance(obj, dict) or int(obj.get("schema") or 1) >= REPORT_SCHEMA:
+    """Read an older report or history line in current terms. Idempotent; never touches files.
+
+    schema 1 (v0.4): old categories → types/confidence/severity, then grouped.
+    schema 2 (v0.5.0): one finding per trigger → grouped per automation.
+    """
+    if not isinstance(obj, dict):
         return obj
+    schema = int(obj.get("schema") or 1)
+    if schema >= REPORT_SCHEMA:
+        return obj
+    if schema == 2:
+        out = dict(obj)
+        if isinstance(obj.get("findings"), list):
+            out["findings"] = group_findings(obj["findings"])
+            summary = _summarise(out["findings"], None)
+            del summary["needs_attention"]  # keep the recorded value; the threshold isn't known here
+            out.update(summary)
+        out["schema"] = REPORT_SCHEMA
+        return out
     out = dict(obj)
     old_counts = obj.get("counts") or {}
     counts = {t.value: 0 for t in FindingType}
@@ -282,7 +383,7 @@ def upgrade_legacy(obj: Any) -> Any:
                 conditions=None,
             )
             findings.append(new)
-        findings.sort(key=lambda f: -rank(f["severity"]))
+        findings = group_findings(findings)
         out["findings"] = findings
         out.update(_summarise(findings, None))
         out["counts"] = counts  # keep the recorded totals
@@ -349,33 +450,82 @@ def _write_files(base: Path, report: dict[str, Any], report_days: int, history_d
 
     path: Path | None = None
     if has_findings(report):
-        stamp = dt_util.as_local(dt_util.parse_datetime(report["generated_at"])).strftime("%Y%m%d-%H%M%S")
-        path = reports / f"report-{stamp}.json"
-        n = 1
-        while path.exists():
-            path = reports / f"report-{stamp}-{n}.json"
-            n += 1
+        path = _new_report_path(reports, report)
         path.write_text(payload, encoding="utf-8")
 
-    _append_history(
-        base,
-        {
-            "schema": REPORT_SCHEMA,
-            "generated_at": report["generated_at"],
-            "window": report["window"],
-            "counts": report["counts"],
-            "counts_by_severity": report.get("counts_by_severity"),
-            "highest_severity": report.get("highest_severity"),
-            "needs_attention": report.get("needs_attention"),
-            "actionable": report.get("needs_attention"),  # deprecated; removed in v0.6.0
-            "skipped": report.get("skipped", 0),
-            "file": path.name if path else None,
-        },
-        history_days,
-        now,
-    )
+    _append_history(base, _history_line(report, path), history_days, now)
     _prune_reports(reports, report_days, now)
     return str(path) if path else None
+
+
+def _new_report_path(reports: Path, report: dict[str, Any]) -> Path:
+    stamp = dt_util.as_local(dt_util.parse_datetime(report["generated_at"])).strftime("%Y%m%d-%H%M%S")
+    path = reports / f"report-{stamp}.json"
+    n = 1
+    while path.exists():
+        path = reports / f"report-{stamp}-{n}.json"
+        n += 1
+    return path
+
+
+def _history_line(report: dict[str, Any], path: Path | None) -> dict[str, Any]:
+    return {
+        "schema": REPORT_SCHEMA,
+        "generated_at": report["generated_at"],
+        "window": report["window"],
+        "counts": report["counts"],
+        "counts_by_severity": report.get("counts_by_severity"),
+        "highest_severity": report.get("highest_severity"),
+        "needs_attention": report.get("needs_attention"),
+        "actionable": report.get("needs_attention"),  # deprecated; removed in v0.6.0
+        "skipped": report.get("skipped", 0),
+        "file": path.name if path else None,
+    }
+
+
+def _update_files(base: Path, report: dict[str, Any]) -> str | None:
+    """Rewrite an already-saved report after it changed (late re-checks).
+
+    Overwrites last_report.json and the report file (creating it if the report
+    now has findings worth keeping) and replaces this report's history line.
+    """
+    reports = base / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    current = (report.get("meta") or {}).get("json_path")
+    path = Path(current) if current else None
+    if path is None and has_findings(report):
+        path = _new_report_path(reports, report)
+    if path is not None:
+        report.setdefault("meta", {})["json_path"] = str(path)
+    payload = json.dumps(report, indent=2, default=str)
+    (base / "last_report.json").write_text(payload, encoding="utf-8")
+    if path is not None:
+        path.write_text(payload, encoding="utf-8")
+
+    hist = base / HISTORY_FILE
+    if hist.exists():
+        lines = hist.read_text(encoding="utf-8").splitlines()
+        for i in range(len(lines) - 1, -1, -1):
+            try:
+                if json.loads(lines[i]).get("generated_at") == report["generated_at"]:
+                    lines[i] = json.dumps(_history_line(report, path), default=str)
+                    break
+            except ValueError:
+                continue
+        tmp = hist.with_suffix(".tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(hist)
+    return str(path) if path else None
+
+
+async def async_update_json(hass: HomeAssistant, report: dict[str, Any]) -> str | None:
+    """Rewrite the saved report and its history line in the executor."""
+    base = Path(hass.config.path(REPORT_DIR))
+    try:
+        return await hass.async_add_executor_job(_update_files, base, report)
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("Could not update the downtime report JSON")
+        return None
 
 
 async def async_write_json(

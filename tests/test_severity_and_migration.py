@@ -102,7 +102,7 @@ def test_upgrade_legacy_history_line():
     assert line["actionable"] == 6  # kept with its old meaning
     assert line["needs_attention"] is None
     assert line["counts_by_severity"] is None and line["highest_severity"] is None
-    assert line["legacy"] is True and line["schema"] == 2
+    assert line["legacy"] is True and line["schema"] == 3
     assert line["file"] == V04_HISTORY["file"]
     assert upgrade_legacy(copy.deepcopy(line)) == line  # idempotent
 
@@ -131,7 +131,7 @@ def test_upgrade_legacy_report_file(clean, first_confidence):
 
 
 def test_upgrade_legacy_passes_v05_through():
-    new = {"schema": 2, "counts": {"missed": 1}, "findings": []}
+    new = {"schema": 3, "counts": {"missed": 1}, "findings": []}
     assert upgrade_legacy(new) is new
     assert upgrade_legacy(None) is None
 
@@ -415,7 +415,7 @@ async def test_upgrade_from_v04_end_to_end(hass, enable_custom_integrations, has
     await hass.async_block_till_done()
 
     rep = auditor.last_report
-    assert rep["schema"] == 2 and "legacy" not in rep
+    assert rep["schema"] == 3 and "legacy" not in rep
     assert [f["entity_id"] for f in rep["findings"]] == ["automation.morning"]
     issues = {iid: i for (d, iid), i in ir.async_get(hass).issues.items() if d == DOMAIN}
     assert old_issue not in issues  # the v0.4 issue is cleared by the first report

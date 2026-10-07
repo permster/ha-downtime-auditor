@@ -15,14 +15,25 @@ MAX_ISSUES = 50
 
 
 def _issue_id(report: dict, finding: dict) -> str:
-    key = "|".join(
-        str(finding.get(k)) for k in ("type", "entity_id", "trigger_index", "summary")
-    )
+    # One issue per automation/script and type (its triggers are listed inside).
+    key = "|".join(str(finding.get(k)) for k in ("type", "entity_id"))
     digest = hashlib.sha1(f"{report['generated_at']}|{key}".encode()).hexdigest()[:12]
     return f"{finding['type']}_{finding['entity_id']}_{digest}".replace(".", "_")
 
 
+MAX_LISTED_TRIGGERS = 10
+
+
 def _detail_text(finding: dict) -> str:
+    triggers = finding.get("triggers") or []
+    if len(triggers) > 1:
+        lines = [
+            f"{c['summary']} ({CONFIDENCE_LABELS.get(c.get('confidence'), c.get('confidence'))})"
+            for c in triggers[:MAX_LISTED_TRIGGERS]
+        ]
+        if len(triggers) > MAX_LISTED_TRIGGERS:
+            lines.append(f"… and {len(triggers) - MAX_LISTED_TRIGGERS} more (see the dashboard)")
+        return "\n".join(f"- {line}" for line in lines)
     d = finding.get("details") or {}
     lines: list[str] = []
     if finding.get("occurrences"):

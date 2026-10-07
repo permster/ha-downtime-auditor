@@ -143,11 +143,11 @@ async def test_full_restart_cycle(hass, enable_custom_integrations):
     path = report["meta"]["json_path"]
     assert path and Path(path).exists()
     saved_report = json.loads(Path(path).read_text())
-    assert saved_report["schema"] == 2 and saved_report["counts"]["missed"] >= 6
+    assert saved_report["schema"] == 3 and saved_report["counts"]["missed"] >= 6
     assert set(saved_report["counts"]) == {"interrupted", "missed", "fired_at_startup"}
     history = (Path(path).parent.parent / "history.jsonl").read_text().splitlines()
     line = json.loads(history[-1])
-    assert line["schema"] == 2 and line["highest_severity"] == "medium"
+    assert line["schema"] == 3 and line["highest_severity"] == "medium"
     assert line["actionable"] == line["needs_attention"] == 0  # default Repairs threshold is High
 
     assert len(push) == 1 and "[Medium]" in push[0].data["message"]
@@ -402,7 +402,7 @@ async def test_entities_repairs_and_websocket(hass, enable_custom_integrations, 
     # Newest first. A downtime only gets a saved report if something was found.
     assert msg["success"] and len(msg["result"]) == 2
     for item in msg["result"]:
-        assert item["schema"] == 2 and "legacy" not in item
+        assert item["schema"] == 3 and "legacy" not in item
         assert item["available"] == (item["file"] is not None)
     assert msg["result"][1]["available"]
     first_file = msg["result"][1]["file"]

@@ -16,9 +16,11 @@ About 5 minutes the first time (it builds a venv), about 2 minutes after that. I
 2. writes demo automations: time and time-pattern triggers, state and numeric-state triggers, an event trigger, a long-running automation and script, conditions that pass, probably fail and fail, a disabled automation, and severity labels;
 3. simulates three outages: a quick clean restart, a 25-minute crash (`kill -9`), and a clean 2-hour outage with runs in progress and states changed while "down". It does this by really stopping HA, moving the stored shutdown time back, and editing restore-state, then restarting.
 
+After the 2-hour outage, a "slow integration" (`sensor.pool_pump`, which only exists while the script sets it through the REST API) reports 30 s late, which exercises the re-checks: one automation is dropped (HA fired it) and one is added (`from: off`, which HA doesn't fire on `unknown → on`). `ctl late-report on|off` simulates it by hand after a `restart`.
+
 Then open http://localhost:8124/downtime-auditor.
 
-Other commands: `start`, `stop [--unclean]`, `restart`, `status`, `logs`, `reset`, and `ctl <command>`. `ctl` drives HA through its API: `call`, `options startup_delay=90`, `wait-report`, `wait-tracking` and more; see the docstring in `sandbox_ctl.py`.
+Other commands: `start`, `stop [--unclean]`, `restart`, `status`, `logs`, `reset`, and `ctl <command>`. `ctl` drives HA through its API: `call`, `options startup_delay=90`, `late-report`, `report-id`, `wait-report`, `wait-tracking` and more; see the docstring in `sandbox_ctl.py`.
 
 Settings: `DA_SANDBOX` (default `~/da-sandbox`), `DA_SANDBOX_PORT` (8124), `DA_SANDBOX_VENV`, and `DA_SANDBOX_HA_VERSION` (`latest`, or e.g. `2026.2.3`). The venv is only rebuilt when it's missing: `rm -rf ~/.venvs/da-sandbox` to pick up a new HA release.
 

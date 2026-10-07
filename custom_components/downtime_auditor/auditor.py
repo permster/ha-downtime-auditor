@@ -12,7 +12,11 @@ from homeassistant.const import EVENT_STATE_CHANGED, __version__ as HA_VERSION
 from homeassistant.core import CoreState, Event, HassJob, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er, label_registry as lr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_change_event,
+    async_track_time_interval,
+)
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -51,6 +55,9 @@ from .const import (
     DEFAULT_STARTUP_DELAY,
     DEFAULT_WRITE_JSON,
     EVENT_REPORT,
+    EVENT_REPORT_UPDATED,
+    SEVERITY_LABELS,
+    UNKNOWN_STATES,
     PERSISTENT_NOTIFICATION_ID,
     SIGNAL_REPORT_UPDATED,
     SEVERITY_SOURCE_DEFAULT,
@@ -71,8 +78,15 @@ from .conditions import (
 )
 from .labels import SeverityLookup, async_create_labels
 from .repairs import async_sync_issues
-from .report import async_deliver, async_write_json, build_report, refresh_summary, upgrade_legacy
-from .severity import effective_severity
+from .report import (
+    async_deliver,
+    async_update_json,
+    async_write_json,
+    build_report,
+    refresh_summary,
+    upgrade_legacy,
+)
+from .severity import at_least, effective_severity
 from .snapshot import (
     automation_entities,
     capture_baseline,
@@ -102,6 +116,12 @@ DEFAULTS = {
 
 SCHEDULE_PLATFORMS = {"time", "time_pattern", "sun", "calendar"}
 
+# Triggers whose entity hadn't reported when the report was built are re-checked
+# once it reports (after RECHECK_SETTLE s, so HA's own trigger has run), for up to
+# RECHECK_TIMEOUT s; whatever is still unknown then is listed as unchecked.
+RECHECK_SETTLE = 5
+RECHECK_TIMEOUT = 600
+
 
 class DowntimeAuditor:
     """Owns all state for one config entry."""
@@ -121,6 +141,7 @@ class DowntimeAuditor:
         self._analysis_due: datetime | None = None
         self.version: str | None = None  # integration version (set by async_setup_entry)
         self._rerate_unsub = None
+        self._rechecks: dict[str, Any] | None = None
         self._frozen = False  # set once the shutdown snapshot is written
 
     # ------------------------------------------------------------------ options
@@ -193,6 +214,7 @@ class DowntimeAuditor:
         if self._rerate_unsub:
             self._rerate_unsub()
             self._rerate_unsub = None
+        self._stop_rechecks()
         if self.active:
             # Mark as clean so a later reload doesn't look like a crash.
             self._refresh(clean=True)
@@ -351,6 +373,7 @@ class DowntimeAuditor:
         # Freeze: HA is about to stop running scripts, and those state changes
         # must not overwrite the snapshot of what was interrupted.
         self._frozen = True
+        self._stop_rechecks()
         await self.store.async_save(self.data)
         _LOGGER.debug(
             "Shutdown snapshot saved (%s runs in progress)",
@@ -414,7 +437,11 @@ class DowntimeAuditor:
             "window_truncated_to_days": max_days if truncated else None,
         }
         report = build_report(window, findings, meta, self.opt(CONF_REPAIRS_MIN_SEVERITY))
+        if analyzer.deferred:
+            report["pending_checks"] = [dict(d) for d in analyzer.deferred]
+            report["recheck_until"] = (dt_util.utcnow() + timedelta(seconds=RECHECK_TIMEOUT)).isoformat()
         await self._async_publish(report)
+        self._start_rechecks(analyzer, report)
         return report
 
     @staticmethod
@@ -477,10 +504,11 @@ class DowntimeAuditor:
         if not rep or rep.get("legacy"):
             return  # old reports keep "Recorded before severity ratings existed"
         lookup = SeverityLookup(self.hass)
-        for f in rep.get("findings") or []:
-            base, source = self._base_severity(lookup, f["entity_id"])
-            sev, reason = self._severity(base, source, f["type"], f["confidence"], f.get("details") or {})
-            f.update(severity=sev.value, severity_source=source, severity_base=base.value, severity_reason=reason)
+        for group in rep.get("findings") or []:
+            for f in group.get("triggers") or [group]:  # rate each trigger; groups are rebuilt below
+                base, source = self._base_severity(lookup, f["entity_id"])
+                sev, reason = self._severity(base, source, f["type"], f["confidence"], f.get("details") or {})
+                f.update(severity=sev.value, severity_source=source, severity_base=base.value, severity_reason=reason)
         refresh_summary(rep, self.opt(CONF_REPAIRS_MIN_SEVERITY))
         if self.opt(CONF_REPAIRS):
             self.data["repair_issues"] = async_sync_issues(
@@ -501,6 +529,151 @@ class DowntimeAuditor:
         # Persist the flag without replacing the previous session, which the
         # startup analysis still needs.
         await self.store.async_save({**self.prev, "labels_created": True})
+
+    # ------------------------------------------------------------------ late re-checks
+
+    @callback
+    def _start_rechecks(self, analyzer: Analyzer, report: dict) -> None:
+        """Watch entities that hadn't reported yet; re-check their triggers when they do."""
+        self._stop_rechecks()
+        pending = list(analyzer.deferred)
+        if not pending:
+            return
+        entities = sorted({p["entity"] for p in pending})
+        self._rechecks = {
+            "analyzer": analyzer,
+            "report_id": report["generated_at"],
+            "pending": pending,
+            "timers": {},
+            "unsubs": [
+                async_track_state_change_event(self.hass, entities, self._on_pending_entity),
+                async_call_later(
+                    self.hass, RECHECK_TIMEOUT, HassJob(self._async_recheck_timeout, cancel_on_shutdown=True)
+                ),
+            ],
+        }
+        _LOGGER.debug("Re-checking %s trigger(s) once %s report", len(pending), entities)
+        for entity_id in entities:  # some may have reported between the analysis and now
+            if (st := self.hass.states.get(entity_id)) is not None and st.state not in UNKNOWN_STATES:
+                self._schedule_recheck(entity_id)
+
+    @callback
+    def _stop_rechecks(self) -> None:
+        if not self._rechecks:
+            return
+        for unsub in [*self._rechecks["unsubs"], *self._rechecks["timers"].values()]:
+            unsub()
+        self._rechecks = None
+
+    @callback
+    def _on_pending_entity(self, event: Event) -> None:
+        new = event.data.get("new_state")
+        if new is not None and new.state not in UNKNOWN_STATES:
+            self._schedule_recheck(event.data["entity_id"])
+
+    @callback
+    def _schedule_recheck(self, entity_id: str) -> None:
+        rc = self._rechecks
+        if not rc:
+            return
+        if timer := rc["timers"].pop(entity_id, None):
+            timer()
+
+        async def _run(_now: datetime) -> None:
+            await self._async_recheck_entity(entity_id)
+
+        rc["timers"][entity_id] = async_call_later(
+            self.hass, RECHECK_SETTLE, HassJob(_run, cancel_on_shutdown=True)
+        )
+
+    async def _async_recheck_entity(self, entity_id: str) -> None:
+        rc, rep = self._rechecks, self.last_report
+        if not rc or not rep or rep.get("generated_at") != rc["report_id"]:
+            self._stop_rechecks()  # a newer report replaced this one
+            return
+        rc["timers"].pop(entity_id, None)
+        resolved, new = [], []
+        for item in [p for p in rc["pending"] if p["entity"] == entity_id]:
+            try:
+                finding, still_unknown = rc["analyzer"].recheck(item, self.startup_triggered)
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Re-check failed for %s", item, exc_info=True)
+                finding, still_unknown = None, False
+            if still_unknown:
+                continue
+            resolved.append(item)
+            if finding is not None:
+                new.append(finding)
+        if not resolved:
+            return
+        keys = {(p["automation"], p["trigger_index"], p["entity"]) for p in resolved}
+        rc["pending"] = [p for p in rc["pending"] if (p["automation"], p["trigger_index"], p["entity"]) not in keys]
+        rep["pending_checks"] = [
+            p for p in rep.get("pending_checks") or []
+            if (p["automation"], p["trigger_index"], p["entity"]) not in keys
+        ]
+        if new:
+            self._check_conditions(new, BaselineSource((self.prev.get("baseline") or {}).get("entities") or {}))
+            self._rate(new)
+            rep["findings"].extend(f.as_dict() for f in new)
+        _LOGGER.debug("%s reported: %s trigger(s) resolved, %s finding(s) added", entity_id, len(resolved), len(new))
+        if not rc["pending"]:
+            self._stop_rechecks()
+        await self._async_report_changed(rep, new)
+
+    async def _async_recheck_timeout(self, _now: datetime) -> None:
+        rc, rep = self._rechecks, self.last_report
+        self._stop_rechecks()
+        if not rc or not rep or rep.get("generated_at") != rc["report_id"]:
+            return
+        rep["unchecked"] = rep.get("pending_checks") or []
+        rep["pending_checks"] = []
+        await self._async_report_changed(rep, [])
+
+    async def _async_report_changed(self, rep: dict, new: list[Finding]) -> None:
+        """The last report changed after publishing: update everything that shows it."""
+        refresh_summary(rep, self.opt(CONF_REPAIRS_MIN_SEVERITY))
+        if self.opt(CONF_REPAIRS):
+            self.data["repair_issues"] = async_sync_issues(
+                self.hass, rep, self.data.get("repair_issues") or [], self.opt(CONF_REPAIRS_MIN_SEVERITY)
+            )
+        if self.opt(CONF_WRITE_JSON):
+            await async_update_json(self.hass, rep)
+        self.data["last_report"] = rep
+        if self.active:
+            await self.store.async_save(self.data)
+        async_dispatcher_send(self.hass, SIGNAL_REPORT_UPDATED)
+        self.hass.bus.async_fire(
+            EVENT_REPORT_UPDATED,
+            {
+                "generated_at": rep["generated_at"],
+                "added": len(new),
+                "pending_checks": len(rep.get("pending_checks") or []),
+                "unchecked": len(rep.get("unchecked") or []),
+                "counts": rep["counts"],
+                "highest_severity": rep["highest_severity"],
+                "needs_attention": rep["needs_attention"],
+            },
+        )
+        await self._async_push_update(new)
+
+    async def _async_push_update(self, new: list[Finding]) -> None:
+        """Follow-up push when a re-check found something worth pushing."""
+        service = (self.opt(CONF_NOTIFY_SERVICE) or "").strip()
+        worth = [f for f in new if at_least(f.severity, self.opt(CONF_PUSH_MIN_SEVERITY))]
+        domain, _, name = service.partition(".")
+        if not worth or not name:
+            return
+        lines = [f"• [{SEVERITY_LABELS[f.severity]}] {f.name}: {f.summary}"[:160] for f in worth[:3]]
+        try:
+            await self.hass.services.async_call(
+                domain,
+                name,
+                {"title": "Downtime Auditor: found after re-check", "message": "\n".join(lines)},
+                blocking=False,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Failed to send the follow-up push via %s", service)
 
     def _startup_fired_findings(self) -> list[Finding]:
         out = []
