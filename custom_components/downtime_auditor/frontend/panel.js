@@ -714,7 +714,7 @@ class DowntimeAuditorPanel extends HTMLElement {
         <p class="muted">Rate automations and scripts with the <code>downtime_auditor_sev: …</code> labels (Critical, High, Medium, Low, None), or from a finding's details.
           Unrated means Medium. Repairs: <b>${esc(sevLabel(s.repairs_min_severity))}</b> and up · push: <b>${esc(sevLabel(s.push_min_severity))}</b> and up (change these in the integration's options).</p>
         <button class="btn secondary" data-act="create-labels">Create severity labels</button>
-        <span class="muted small-inline">Only labels that are missing are created.</span>
+        <span class="muted small-inline">Rating something creates its label automatically. This creates all five now (only the missing ones), e.g. to label automations in their settings.</span>
       </div>
       <div class="card"><h3>Running right now <span class="muted">(${s.running_now.length})</span>
         <span class="live-dot" title="Updates as automations and scripts start and finish"></span></h3>

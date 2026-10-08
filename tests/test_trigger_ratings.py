@@ -12,6 +12,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from custom_components.downtime_auditor.const import DOMAIN, STORAGE_KEY, Severity
+from custom_components.downtime_auditor.labels import async_create_labels
 from custom_components.downtime_auditor.severity import effective_severity
 
 
@@ -51,6 +52,7 @@ async def _setup(hass, options):
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
+    async_create_labels(hass)
     high = lr.async_get(hass).async_get_label_by_name("downtime_auditor_sev: high").label_id
     er.async_get(hass).async_update_entity("automation.doorbell", labels={high})
     auditor = hass.data[DOMAIN]

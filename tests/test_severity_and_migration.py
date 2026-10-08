@@ -393,7 +393,7 @@ async def test_upgrade_from_v04_end_to_end(hass, enable_custom_integrations, has
     await hass.async_block_till_done()
     auditor = hass.data[DOMAIN]
 
-    # Before the analysis: migrated entry, the old report reads in new terms, labels exist,
+    # Before the analysis: migrated entry, the old report reads in new terms, no labels yet,
     # and the previous session is still stored for the analysis.
     assert entry.version == 2
     assert "repairs_possible" not in entry.options and "include_unverifiable" not in entry.options
@@ -401,9 +401,9 @@ async def test_upgrade_from_v04_end_to_end(hass, enable_custom_integrations, has
     assert reg.async_get("sensor.downtime_auditor_possibly_missed_triggers") is None
     assert reg.async_get("sensor.downtime_auditor_fired_at_startup") is not None
     assert hass.states.get("sensor.downtime_auditor_highest_severity").state == "medium"
-    assert {f"downtime_auditor_sev: {s}" for s in ("critical", "high", "medium", "low", "none")} <= {
-        label.name for label in lr.async_get(hass).async_list_labels()
-    }
+    assert not any(  # created only when something is rated
+        label.name.startswith("downtime_auditor_sev") for label in lr.async_get(hass).async_list_labels()
+    )
     assert hass_storage[STORAGE_KEY]["data"]["session"]["id"] == "v04"
 
     # HA finishes starting → first v0.5 report
@@ -422,7 +422,7 @@ async def test_upgrade_from_v04_end_to_end(hass, enable_custom_integrations, has
     assert hass.states.get("binary_sensor.downtime_auditor_needs_attention").state == "on"
     assert len(push) == 1
     stored = hass_storage[STORAGE_KEY]["data"]
-    assert stored["labels_created"] is True and stored["session"]["id"] != "v04"
+    assert stored["session"]["id"] != "v04"
 
     # History: the new line plus the v0.4 line, both in v0.5 terms
     client = await hass_ws_client(hass)

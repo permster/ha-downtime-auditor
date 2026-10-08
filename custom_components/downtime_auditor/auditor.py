@@ -79,7 +79,7 @@ from .conditions import (
     condition_entities,
     evaluate_finding,
 )
-from .labels import SeverityLookup, async_create_labels
+from .labels import SeverityLookup
 from .repairs import async_sync_issues
 from .report import (
     async_deliver,
@@ -172,10 +172,8 @@ class DowntimeAuditor:
             "running": None,
             "last_report": self.last_report,
             "repair_issues": list(self.prev.get("repair_issues") or []),
-            "labels_created": bool(self.prev.get("labels_created")),
             "trigger_ratings": dict(self.prev.get("trigger_ratings") or {}),
         }
-        await self._async_create_labels_once()
 
         # Shutdown jobs run *before* integrations (and running scripts) are stopped.
         remove = self.hass.async_add_shutdown_job(HassJob(self._async_on_shutdown, cancel_on_shutdown=False))
@@ -554,18 +552,6 @@ class DowntimeAuditor:
         if self.active:
             await self.store.async_save(self.data)
         async_dispatcher_send(self.hass, SIGNAL_REPORT_UPDATED)
-
-    async def _async_create_labels_once(self) -> None:
-        """Create the severity labels on first setup only; never again automatically."""
-        if self.data.get("labels_created"):
-            return
-        created = async_create_labels(self.hass)
-        if created:
-            _LOGGER.info("Created severity labels: %s", ", ".join(created))
-        self.data["labels_created"] = True
-        # Persist the flag without replacing the previous session, which the
-        # startup analysis still needs.
-        await self.store.async_save({**self.prev, "labels_created": True})
 
     # ------------------------------------------------------------------ late re-checks
 

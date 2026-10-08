@@ -107,7 +107,7 @@ Every finding has three separate attributes. They use the same words everywhere:
 
 ### Rating your automations
 
-On first setup Downtime Auditor creates five labels: `downtime_auditor_sev: critical`, `… high`, `… medium`, `… low` and `… none`. Add one to an automation (or a script, for its Interrupted findings) in its settings, or pick a rating from a finding's details on the dashboard. If several are attached, the highest wins. Unlabeled automations are **Medium**.
+Ratings are five labels: `downtime_auditor_sev: critical`, `… high`, `… medium`, `… low` and `… none`. Pick a rating from a finding's details on the dashboard, and Downtime Auditor creates that label the first time it's needed. To add them to automations (or scripts, for their Interrupted findings) in their own settings instead, create all five first with the **Create severity labels** button on the dashboard's Live status tab or the `downtime_auditor.create_severity_labels` service. If several are attached, the highest wins. Unlabeled automations are **Medium**.
 
 **Rating one trigger.** An automation's triggers can matter differently: "events fired while Home Assistant was down are never delivered" is true after every restart and there's nothing to act on, while the same automation's time trigger may matter a lot. In a finding with several triggers, each trigger has its own **Rate this trigger** selector on the dashboard. A trigger rating overrides the automation's label for that trigger only, is kept by the integration (keyed by the trigger's `id:` if it has one, otherwise its position and type), and isn't capped. The finding takes its most severe trigger's rating.
 
@@ -115,7 +115,7 @@ On first setup Downtime Auditor creates five labels: `downtime_auditor_sev: crit
 
 A rating takes effect straight away, whether you set it on the dashboard or in Home Assistant's own label editor: the current report, its Repairs issues and the sensors are updated (for example, rating an automation None removes its Repair).
 
-If you delete the labels they stay deleted. Recreate the missing ones with the **Create severity labels** button on the dashboard's Live status tab, or the `downtime_auditor.create_severity_labels` service.
+Labels aren't created up front, so tools like Spook don't flag them as unused. You can delete one that isn't on anything; picking that rating again recreates it.
 
 The rating is then adjusted per finding:
 

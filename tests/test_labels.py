@@ -10,6 +10,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from custom_components.downtime_auditor.const import DOMAIN, STORAGE_KEY
+from custom_components.downtime_auditor.labels import async_create_labels
 
 SEV_NAMES = {f"downtime_auditor_sev: {s}" for s in ("critical", "high", "medium", "low", "none")}
 
@@ -29,6 +30,7 @@ def _names(hass):
 
 
 def _label_id(hass, sev):
+    async_create_labels(hass)  # labels exist only once something is rated (or the service ran)
     return lr.async_get(hass).async_get_label_by_name(f"downtime_auditor_sev: {sev}").label_id
 
 
@@ -57,24 +59,28 @@ async def _analyze(hass, auditor):
     return {f["entity_id"]: f for f in rep["findings"]}
 
 
-async def test_labels_created_once(hass, enable_custom_integrations, hass_storage):
+async def test_labels_created_on_demand(hass, enable_custom_integrations, hass_ws_client):
+    """No labels until something is rated (unused labels are flagged by tools like Spook)."""
     entry, auditor = await _setup(hass, "03:00:00")
-    assert SEV_NAMES <= _names(hass)
-    label = lr.async_get(hass).async_get_label_by_name("downtime_auditor_sev: critical")
-    assert (label.color, label.icon) == ("red", "mdi:timeline-check-outline")
-    assert hass_storage[STORAGE_KEY]["data"]["labels_created"] is True
-
-    # The user deletes one; a reload (or restart) must not bring it back.
-    lr.async_get(hass).async_delete(_label_id(hass, "none"))
+    assert not SEV_NAMES & _names(hass)
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
-    assert "downtime_auditor_sev: none" not in _names(hass)
+    assert not SEV_NAMES & _names(hass)
 
-    # The service recreates only what is missing.
+    # Rating from the dashboard creates just that label.
+    client = await hass_ws_client(hass)
+    await client.send_json({"id": 1, "type": "downtime_auditor/set_severity",
+                            "entity_id": "automation.morning", "severity": "high"})
+    assert (await client.receive_json())["success"]
+    assert SEV_NAMES & _names(hass) == {"downtime_auditor_sev: high"}
+    label = lr.async_get(hass).async_get_label_by_name("downtime_auditor_sev: high")
+    assert (label.color, label.icon) == ("orange", "mdi:timeline-check-outline")
+
+    # The service creates only what is missing.
     resp = await hass.services.async_call(
         DOMAIN, "create_severity_labels", {}, blocking=True, return_response=True
     )
-    assert resp == {"created": ["downtime_auditor_sev: none"]}
+    assert sorted(resp["created"]) == sorted(SEV_NAMES - {"downtime_auditor_sev: high"})
     assert SEV_NAMES <= _names(hass)
     resp = await hass.services.async_call(
         DOMAIN, "create_severity_labels", {}, blocking=True, return_response=True
@@ -83,7 +89,7 @@ async def test_labels_created_once(hass, enable_custom_integrations, hass_storag
 
 
 async def test_first_start_keeps_previous_session(hass, enable_custom_integrations, hass_storage):
-    """Recording labels_created must not overwrite the session the startup analysis needs."""
+    """Setup must not overwrite the session the startup analysis needs."""
     from homeassistant.core import CoreState
 
     hass.set_state(CoreState.not_running)
@@ -94,7 +100,8 @@ async def test_first_start_keeps_previous_session(hass, enable_custom_integratio
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     stored = hass_storage[STORAGE_KEY]["data"]
-    assert stored["session"]["id"] == "prev" and stored["labels_created"] is True
+    assert stored["session"]["id"] == "prev"
+    assert not SEV_NAMES & _names(hass)
 
 
 async def test_labels_drive_severity(hass, enable_custom_integrations):

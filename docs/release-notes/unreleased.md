@@ -9,3 +9,4 @@ This release lets you rate individual triggers, can hide triggers that can't be 
 
 - **New icon:** the orange exclamation badge, which looked like a warning, is now a magnifier with a check. The sidebar and the severity labels use a matching check icon (labels you already have keep theirs).
 - Clearer wording for triggers that can't be confirmed, such as device button presses and MQTT messages.
+- **Severity labels are created when you first use them**, not all five at setup, so Spook no longer reports them as unused labels. Labels that earlier versions created and that aren't on anything can be deleted; picking that rating on the dashboard recreates it. The *Create severity labels* button and service still create all five.
