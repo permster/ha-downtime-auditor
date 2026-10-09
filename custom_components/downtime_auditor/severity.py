@@ -38,6 +38,11 @@ def highest(values: Iterable[Any]) -> Severity | None:
     return best
 
 
+def _minutes(value: float) -> str:
+    whole = max(0, round(value))
+    return "under a minute" if whole == 0 else f"{whole} min"
+
+
 def _cap_low(base: Severity) -> Severity:
     return base if rank(base) <= rank(Severity.LOW) else Severity.LOW
 
@@ -49,12 +54,17 @@ def effective_severity(
     confidence: str,
     conditions: str | None,
     unconfirmable: str = Severity.LOW,
+    caught_up_in: float | None = None,
+    catch_up_limit: int = 0,
 ) -> tuple[Severity, str]:
     """Return (severity, reason) for one finding.
 
     Precedence: failed conditions (None) > a rating set for this trigger (as is) >
-    the "can't be confirmed" option set to None > Critical (never capped) > caps.
+    the "can't be confirmed" option set to None > a time pattern that runs again soon (None) >
+    Critical (never capped) > caps.
     `unconfirmable` is that option: Low (cap Unknown-confidence triggers at Low) or None.
+    `caught_up_in`: minutes from startup to a time pattern's next tick; None within
+    `catch_up_limit` minutes (0 = off).
     """
     if conditions == "fail":
         return Severity.NONE, "conditions would not have passed"
@@ -63,6 +73,8 @@ def effective_severity(
     why_base = "set by label" if source == SEVERITY_SOURCE_LABEL else "default for unrated automations"
     if confidence == Confidence.UNKNOWN and unconfirmable == Severity.NONE:
         return Severity.NONE, "can't be confirmed, and the integration's options set those to None"
+    if caught_up_in is not None and catch_up_limit > 0 and caught_up_in <= catch_up_limit:
+        return Severity.NONE, f"the pattern runs again {_minutes(caught_up_in)} after Home Assistant started"
     if base == Severity.CRITICAL:
         return base, why_base
     if finding_type == FindingType.FIRED_AT_STARTUP and rank(base) > rank(Severity.LOW):

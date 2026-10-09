@@ -106,6 +106,8 @@ const tick = () => new Promise((r) => setImmediate(r));
   p._render();
   html = p.shadowRoot.innerHTML;
   assert(/<option value="high" selected>High<\/option>/.test(html), "picker shows the label rating");
+  assert(html.includes('<div class="k">Rate this trigger</div>'), "single-trigger findings can rate their trigger too");
+  assert.strictEqual((html.match(/data-rate-trigger=/g) || []).length, 2, "one trigger selector each for Morning and Pattern");
 
   // ---- a multi-trigger automation is one row, with its triggers listed when expanded
   const evt = fixture.report.findings.find((f) => f.name === "Evt");
@@ -117,7 +119,7 @@ const tick = () => new Promise((r) => setImmediate(r));
   html = p.shadowRoot.innerHTML;
   assert(html.includes('<div class="k">Triggers (2)</div>'), "trigger list in the details");
   assert.strictEqual((html.match(/class="trig"/g) || []).length, 2, "both triggers listed");
-  assert.strictEqual((html.match(/data-rate-trigger=/g) || []).length, 2, "a rating selector per trigger");
+  assert.strictEqual((html.match(/data-rate-trigger=/g) || []).length, 4, "a rating selector per trigger (Evt's 2 + Morning's + Pattern's)");
   assert(html.includes("Automation&#39;s rating") || html.includes("Automation's rating"), "default = automation's rating");
   await p._rateTrigger({ entity_id: "automation.evt", item_id: "b", trigger_id: null, trigger_index: 1, platform: "event" }, "none");
   const trig = sent.filter((m) => m.type.endsWith("set_trigger_severity")).pop();

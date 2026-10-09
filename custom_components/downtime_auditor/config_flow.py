@@ -22,6 +22,7 @@ from .const import (
     CONF_REPAIRS_MIN_SEVERITY,
     CONF_SHOW_SEVERITY_NONE,
     CONF_UNCONFIRMABLE_SEVERITY,
+    CONF_TIME_PATTERN_CATCH_UP,
     CONF_HISTORY_DAYS,
     CONF_REPORT_DAYS,
     CONF_SIDEBAR_PANEL,
@@ -70,6 +71,9 @@ def _schema(values: dict[str, Any]) -> vol.Schema:
                     mode=selector.SelectSelectorMode.DROPDOWN,
                     translation_key="unconfirmable",
                 )
+            ),
+            vol.Required(CONF_TIME_PATTERN_CATCH_UP, default=d(CONF_TIME_PATTERN_CATCH_UP)): vol.All(
+                num(0, 1440, "min"), vol.Coerce(int)
             ),
             vol.Required(CONF_WRITE_JSON, default=d(CONF_WRITE_JSON)): bool,
             vol.Required(CONF_REPORT_DAYS, default=d(CONF_REPORT_DAYS)): vol.All(

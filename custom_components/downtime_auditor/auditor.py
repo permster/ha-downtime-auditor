@@ -34,6 +34,7 @@ from .const import (
     CONF_REPAIRS_MIN_SEVERITY,
     CONF_SHOW_SEVERITY_NONE,
     CONF_UNCONFIRMABLE_SEVERITY,
+    CONF_TIME_PATTERN_CATCH_UP,
     CONF_HISTORY_DAYS,
     CONF_REPORT_DAYS,
     CONF_SIDEBAR_PANEL,
@@ -51,6 +52,7 @@ from .const import (
     DEFAULT_SEVERITY,
     DEFAULT_SHOW_SEVERITY_NONE,
     DEFAULT_UNCONFIRMABLE_SEVERITY,
+    DEFAULT_TIME_PATTERN_CATCH_UP,
     DEFAULT_HISTORY_DAYS,
     DEFAULT_REPORT_DAYS,
     DEFAULT_SIDEBAR_PANEL,
@@ -75,7 +77,7 @@ from .conditions import (
     BaselineSource,
     StateSource,
     async_history_source,
-    condition_configs,
+    automation_conditions,
     condition_entities,
     evaluate_finding,
 )
@@ -116,6 +118,7 @@ DEFAULTS = {
     CONF_PUSH_MIN_SEVERITY: DEFAULT_PUSH_MIN_SEVERITY,
     CONF_SHOW_SEVERITY_NONE: DEFAULT_SHOW_SEVERITY_NONE,
     CONF_UNCONFIRMABLE_SEVERITY: DEFAULT_UNCONFIRMABLE_SEVERITY,
+    CONF_TIME_PATTERN_CATCH_UP: DEFAULT_TIME_PATTERN_CATCH_UP,
 }
 
 SCHEDULE_PLATFORMS = {"time", "time_pattern", "sun", "calendar"}
@@ -421,7 +424,7 @@ class DowntimeAuditor:
         findings += analyzer.analyze(self.startup_triggered)
         findings += await analyzer.async_analyze_calendars()
         findings += self._startup_fired_findings()
-        self._check_conditions(findings, BaselineSource((self.prev.get("baseline") or {}).get("entities") or {}))
+        self._check_conditions(findings, self._baseline_source())
         self._rate(findings)
 
         n_auto, n_trig = self._counts()
@@ -497,7 +500,14 @@ class DowntimeAuditor:
     def _severity(self, base: Severity, source: str, ftype: str, confidence: str, details: dict) -> tuple[Severity, str]:
         cond = (details or {}).get("conditions") or {}
         sev, reason = effective_severity(
-            base, source, ftype, confidence, cond.get("result"), self.opt(CONF_UNCONFIRMABLE_SEVERITY)
+            base,
+            source,
+            ftype,
+            confidence,
+            cond.get("result"),
+            self.opt(CONF_UNCONFIRMABLE_SEVERITY),
+            caught_up_in=(details or {}).get("next_due_minutes"),
+            catch_up_limit=int(self.opt(CONF_TIME_PATTERN_CATCH_UP) or 0),
         )
         if cond.get("result") == "fail" and cond.get("why"):
             reason = f"{reason}: {cond['why']}"
@@ -508,13 +518,17 @@ class DowntimeAuditor:
     # Conditions are checked only where the trigger very likely did fire.
     CONDITION_CONFIDENCE = (Confidence.CONFIRMED, Confidence.PROBABLE)
 
+    def _baseline_source(self) -> BaselineSource:
+        """Pre-downtime values; values that are the same after startup count as unchanged."""
+        return BaselineSource((self.prev.get("baseline") or {}).get("entities") or {}, self.hass)
+
     def _condition_targets(self, findings: list[Finding]) -> list[tuple[Finding, list[dict]]]:
         autos = {getattr(e, "entity_id", None): e for e in automation_entities(self.hass)}
         out = []
         for f in findings:
             if f.type != FindingType.MISSED or f.confidence not in self.CONDITION_CONFIDENCE:
                 continue
-            if (ent := autos.get(f.entity_id)) is None or not (confs := condition_configs(ent)):
+            if (ent := autos.get(f.entity_id)) is None or not (confs := automation_conditions(ent)):
                 continue
             out.append((f, confs))
         return out
@@ -636,7 +650,7 @@ class DowntimeAuditor:
             if (p["automation"], p["trigger_index"], p["entity"]) not in keys
         ]
         if new:
-            self._check_conditions(new, BaselineSource((self.prev.get("baseline") or {}).get("entities") or {}))
+            self._check_conditions(new, self._baseline_source())
             self._rate(new)
             rep["findings"].extend(f.as_dict() for f in new)
         _LOGGER.debug("%s reported: %s trigger(s) resolved, %s finding(s) added", entity_id, len(resolved), len(new))

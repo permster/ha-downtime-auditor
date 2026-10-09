@@ -109,7 +109,7 @@ Every finding has three separate attributes. They use the same words everywhere:
 
 Ratings are five labels: `downtime_auditor_sev: critical`, `… high`, `… medium`, `… low` and `… none`. Pick a rating from a finding's details on the dashboard, and Downtime Auditor creates that label the first time it's needed. To add them to automations (or scripts, for their Interrupted findings) in their own settings instead, create all five first with the **Create severity labels** button on the dashboard's Live status tab or the `downtime_auditor.create_severity_labels` service. If several are attached, the highest wins. Unlabeled automations are **Medium**.
 
-**Rating one trigger.** An automation's triggers can matter differently: "events fired while Home Assistant was down are never delivered" is true after every restart and there's nothing to act on, while the same automation's time trigger may matter a lot. In a finding with several triggers, each trigger has its own **Rate this trigger** selector on the dashboard. A trigger rating overrides the automation's label for that trigger only, is kept by the integration (keyed by the trigger's `id:` if it has one, otherwise its position and type), and isn't capped. The finding takes its most severe trigger's rating.
+**Rating one trigger.** An automation's triggers can matter differently: "events fired while Home Assistant was down are never delivered" is true after every restart and there's nothing to act on, while the same automation's time trigger may matter a lot. Every missed trigger has its own **Rate this trigger** selector on the dashboard, whether the finding lists one trigger or several. A trigger rating overrides the automation's label for that trigger only, is kept by the integration (keyed by the trigger's `id:` if it has one, otherwise its position and type), and isn't capped. The finding takes its most severe trigger's rating.
 
 **Triggers that can't be confirmed** (event, webhook, MQTT, tag, conversation, and device triggers that are presses, like Aqara buttons) are Low by default. Set *Severity for triggers that can't be confirmed* to **None** in the options to hide them all, even in Critical automations. A rating set for one trigger still wins.
 
@@ -119,7 +119,8 @@ Labels aren't created up front, so tools like Spook don't flag them as unused. Y
 
 The rating is then adjusted per finding:
 
-- **Conditions would have failed** → None.
+- **Conditions would have failed** → None. This includes actions that would all have been skipped (see [Condition checks](#condition-checks)).
+- **A time pattern that runs again soon** → None. A missed `/15` tick is only a delay: the pattern runs again within minutes of startup. Ticks whose next run is within *Time patterns that run again soon* (60 minutes by default) of Home Assistant starting are None; slower patterns keep their rating.
 - **Fired at startup**, or **Unknown confidence** → capped at Low.
 - **Critical is never capped**, except by failed conditions. A Critical automation with an event, webhook, MQTT, tag or conversation trigger therefore raises a Critical **Repair on every restart**, because a message could have been lost each time. To avoid that, rate those triggers individually, or set *Severity for triggers that can't be confirmed* to None.
 
@@ -128,6 +129,8 @@ Repairs, push and `binary_sensor.downtime_auditor_needs_attention` only consider
 ### Condition checks
 
 For Missed findings with Confirmed or Probable confidence, the automation's `conditions` are evaluated at each missed time. If any missed time passes, the result is *pass*; if all fail, *fail*; otherwise *unknown*.
+
+The **actions** are checked too, when they start with a gate: a `choose` without `default`, an `if` without `else`, or a condition step. If every gate fails (for example, the only `choose` option needs a different time of day), nothing would have run and the finding is None, shown as *actions: nothing would have run*. Gates use the same condition checks, including `trigger` ids.
 
 | Condition | After a real outage | What-if (past window) |
 |---|---|---|
@@ -140,7 +143,7 @@ For Missed findings with Confirmed or Probable confidence, the automation's `con
 | `trigger` (trigger id) | Exact | Exact |
 | `device` and anything else | Unknown | Unknown |
 
-Values from before a real outage are estimates: you might have changed something while HA was down. So a fail that depends on them is shown as **"probably failed"** and the finding keeps its normal severity; only a fail decided by exact checks (time, sun, trigger id, or recorder history in what-if) sets the severity to None.
+Values from before a real outage are estimates: you might have changed something while HA was down. If an entity has the **same value after startup** as before the downtime, it's taken as unchanged throughout, and a fail that depends on it counts (shown as *same before and after the downtime*). If the value differs now, a fail that depends on it is shown as **"probably failed"** and the finding keeps its normal severity. A fail decided by exact checks (time, sun, trigger id, values unchanged across the downtime, or recorder history in what-if) sets the severity to None.
 
 ## Installation
 
@@ -220,6 +223,7 @@ content: >
 | Push only when something was found | on | Skip the push when nothing reached the minimum severity for push. |
 | Show severity None in the dashboard | off | The dashboard also has its own toggle. |
 | Severity for triggers that can't be confirmed | Low | Event, webhook, MQTT, tag, conversation and device press triggers. **None** hides them (even in Critical automations). A rating set for one trigger always wins. |
+| Time patterns that run again soon | 60 min | A missed time pattern tick is None when the pattern runs again within this many minutes of Home Assistant starting. 0 turns it off. A rating set for one trigger always wins. |
 | Write JSON reports | on | Saves reports under `/config/downtime_auditor/`. The History tab needs this. |
 | Keep detailed reports for | 30 days | A full report is saved only when a downtime had a finding worth keeping (not severity None, and not just unconfirmable event-style triggers). Older reports are deleted, with a hard cap of 500 files. |
 | Keep history summary for | 365 days | One line per downtime (about 0.5 KB each), including restarts where nothing was found. |

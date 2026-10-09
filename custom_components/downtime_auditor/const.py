@@ -32,6 +32,8 @@ CONF_PUSH_MIN_SEVERITY = "push_min_severity"
 CONF_SHOW_SEVERITY_NONE = "show_severity_none"
 # Severity for triggers that can't be confirmed (event, webhook, MQTT, tag, conversation, ...): low | none
 CONF_UNCONFIRMABLE_SEVERITY = "unconfirmable_severity"
+# A missed time_pattern tick is None when the pattern runs again within this many minutes of startup (0 = off)
+CONF_TIME_PATTERN_CATCH_UP = "time_pattern_catch_up_minutes"
 
 # Options removed in config entry version 2 (dropped by async_migrate_entry).
 LEGACY_OPTIONS = ("repairs_possible", "include_unverifiable", "retention")
@@ -53,6 +55,7 @@ DEFAULT_REPAIRS_MIN_SEVERITY = "high"
 DEFAULT_PUSH_MIN_SEVERITY = "high"
 DEFAULT_SHOW_SEVERITY_NONE = False
 DEFAULT_UNCONFIRMABLE_SEVERITY = "low"
+DEFAULT_TIME_PATTERN_CATCH_UP = 60  # minutes
 
 SIGNAL_REPORT_UPDATED = f"{DOMAIN}_report_updated"
 PANEL_URL = "downtime-auditor"

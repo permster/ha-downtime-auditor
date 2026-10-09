@@ -267,6 +267,8 @@ async def test_real_outage_conditions(hass, enable_custom_integrations):
     await auditor._async_on_shutdown()  # vac is off in the baseline
     saved = copy.deepcopy(auditor.data)
     assert "input_boolean.vac" in saved["baseline"]["entities"]  # captured for conditions
+    # Changed since the shutdown: the pre-downtime value is only an estimate.
+    await hass.services.async_call("input_boolean", "turn_on", {"entity_id": "input_boolean.vac"}, blocking=True)
     saved["session"]["shutdown_at"] = (dt_util.utcnow() - timedelta(hours=2)).isoformat()
     auditor.prev = saved
     auditor.started_at = dt_util.utcnow()

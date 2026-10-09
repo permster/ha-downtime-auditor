@@ -185,7 +185,7 @@ def capture_baseline(hass: HomeAssistant) -> dict:
     Entities read by automation *conditions* are included too, so conditions can
     be checked against pre-downtime values.
     """
-    from .conditions import condition_configs, condition_entities  # noqa: PLC0415  (import cycle)
+    from .conditions import automation_conditions, condition_entities  # noqa: PLC0415  (import cycle)
 
     entities: dict[str, set[str]] = {}
     templates: dict[str, bool | None] = {}
@@ -214,7 +214,7 @@ def capture_baseline(hass: HomeAssistant) -> dict:
                     val = render_number(hass, src, hass.states.get(eid))
                     templates[f"{entity_id}#{idx}#{eid}"] = jsonable(val)
         try:
-            for eid, attrs in condition_entities(hass, condition_configs(ent)).items():
+            for eid, attrs in condition_entities(hass, automation_conditions(ent)).items():
                 entities.setdefault(eid, set()).update(attrs)
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Could not collect condition entities for %s", entity_id, exc_info=True)

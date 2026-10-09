@@ -6,7 +6,8 @@ module re-implements the common condition types against a *state source*:
 
 * BaselineSource — states captured just before the downtime (real outages).
   HA wasn't running, so there is no history; the last known value is the best
-  estimate, and it is treated as such.
+  estimate, and it is treated as such — unless the entity has the same value
+  after startup, in which case it's taken as unchanged throughout.
 * HistorySource — recorder history (what-if windows in the past).
 
 Anything that can't be reconstructed is `unknown`, never a guess.
@@ -39,6 +40,7 @@ INPUT_ENTITY_ID = re.compile(r"^input_(?:select|text|number|boolean|datetime)\.(
 # Templates that depend on the clock or the triggering event can't be replayed.
 UNREPLAYABLE = re.compile(r"\b(now|utcnow)\s*\(|\btrigger\b|\bthis\b|\bas_timestamp\s*\(\s*\)")
 MAX_CHECKED_OCCURRENCES = 25
+UNCHANGED_BASIS = "unchanged"  # pre-downtime value, and the same after startup
 
 
 # ---------------------------------------------------------------- state sources
@@ -68,8 +70,20 @@ class BaselineSource:
     basis = "baseline"
     exact = False  # values may have changed while HA was down
 
-    def __init__(self, entities: dict[str, dict | None]) -> None:
+    def __init__(self, entities: dict[str, dict | None], hass: HomeAssistant | None = None) -> None:
         self._entities = entities or {}
+        self._hass = hass
+
+    def unchanged(self, entity_id: str, attribute: str | None = None) -> bool:
+        """Same value before the downtime and after startup: taken as unchanged throughout."""
+        rec = self._entities.get(entity_id)
+        cur = self._hass.states.get(entity_id) if self._hass is not None else None
+        if not rec or cur is None or cur.state in UNKNOWN_STATES or str(rec.get("state")) != cur.state:
+            return False
+        if attribute is None:
+            return True
+        attrs = rec.get("attributes") or {}
+        return attribute in attrs and attrs[attribute] == cur.attributes.get(attribute)
 
     def get(self, entity_id: str, when: datetime | None) -> PastState | None:
         rec = self._entities.get(entity_id)
@@ -160,6 +174,71 @@ def condition_configs(entity: Any) -> list[dict]:
     return out
 
 
+def action_gate(entity: Any) -> dict | None:
+    """The automation's actions as a pseudo-condition, when they start with a gate.
+
+    Actions that start with `choose` (no default), `if` (no else) or a condition step
+    may do nothing at all; evaluated like a condition, "fail" means nothing would have
+    run. None when the first action always runs.
+    """
+    seq = getattr(getattr(entity, "action_script", None), "sequence", None)
+    if seq is None:
+        raw = getattr(entity, "raw_config", None) or {}
+        seq = raw.get("actions") or raw.get("action")
+    items = _gate_items(seq)
+    if not items or items[0]["kind"] in ("run", "stop"):
+        return None
+    return {"condition": "actions", "items": items}
+
+
+def _gate_conds(value: Any) -> list[dict]:
+    out = []
+    for conf in as_list(value):
+        if isinstance(conf, str):
+            conf = {"condition": "template", "value_template": conf}
+        if isinstance(conf, dict):
+            out.append(conf)
+    return out
+
+
+def _gate_items(seq: Any) -> list[dict]:
+    """Up to the first action that always runs: condition steps and choose/if branches."""
+    items: list[dict] = []
+    for step in as_list(seq):
+        if not isinstance(step, dict) or not _enabled(step):
+            continue
+        if "condition" in step:
+            items.append({"kind": "cond", "conf": step})
+        elif "choose" in step:
+            options = [
+                _gate_conds(o.get("conditions"))
+                for o in as_list(step["choose"])
+                if isinstance(o, dict) and _enabled(o)
+            ]
+            items.append({"kind": "branch", "label": "choose", "options": options,
+                          "default": bool(as_list(step.get("default")))})
+        elif "if" in step:
+            items.append({"kind": "branch", "label": "if", "options": [_gate_conds(step["if"])],
+                          "default": bool(as_list(step.get("else")))})
+        elif "variables" in step:
+            continue
+        elif "stop" in step:
+            items.append({"kind": "stop"})
+            break
+        else:
+            items.append({"kind": "run"})
+            break
+    return items
+
+
+def automation_conditions(entity: Any) -> list[dict]:
+    """Conditions to check for a missed trigger: the automation's own, plus its action gate."""
+    confs = condition_configs(entity)
+    if (gate := action_gate(entity)) is not None:
+        confs.append(gate)
+    return confs
+
+
 def _opts(conf: dict) -> dict:
     """Fields, whether top-level or under `options` (integration-provided conditions)."""
     opts = conf.get("options")
@@ -228,6 +307,13 @@ def condition_entities(hass: HomeAssistant, confs: Iterable[dict]) -> dict[str, 
         if kind in ("and", "or", "not"):
             stack.extend(_children(conf))
             continue
+        if kind == "actions":
+            for item in conf.get("items") or []:
+                if item["kind"] == "cond":
+                    stack.append(item["conf"])
+                for option in item.get("options") or []:
+                    stack.extend(option)
+            continue
         o = _opts(conf)
         for eid in as_list(o.get("entity_id")):
             add(eid, o.get("attribute"))
@@ -271,6 +357,28 @@ def none_of(results: Iterable[str]) -> str:
     return PASS if all(r == FAIL for r in results) else UNKNOWN
 
 
+def _gate(entries: list[tuple[str, list[dict], bool]], result_of) -> str:
+    """Would any action run? pass: yes; fail: no gate lets anything through; else unknown."""
+    gated = False  # an earlier condition step can't be told
+    maybe = False  # a branch might have been taken
+    for kind, steps, default in entries:
+        if kind == "run":
+            return UNKNOWN if gated else PASS
+        if kind == "stop":
+            break
+        if kind == "cond":
+            res = result_of(steps[0])
+            if res == FAIL:
+                break
+            gated = gated or res == UNKNOWN
+            continue
+        results = [result_of(s) for s in steps]
+        if default or PASS in results:
+            return UNKNOWN if gated else PASS
+        maybe = maybe or UNKNOWN in results
+    return UNKNOWN if maybe else FAIL
+
+
 # ---------------------------------------------------------------- evaluator
 
 
@@ -281,6 +389,7 @@ class ConditionEvaluator:
         self.hass = hass
         self.source = source
         self.trigger_id = trigger_id
+        self._reads: list[tuple[str, str | None]] = []  # (entity_id, attribute) read by the current step
 
     def evaluate(self, confs: list[dict], when: datetime | None) -> tuple[str, list[dict]]:
         steps = [self._eval(c, when) for c in confs if _enabled(c)]
@@ -297,11 +406,18 @@ class ConditionEvaluator:
         handler = getattr(self, f"_c_{kind}", None)
         if handler is None:
             return self._step(kind, UNKNOWN, f"'{kind}' conditions can't be checked after the fact")
+        outer, self._reads = self._reads, []
         try:
-            return handler(_opts(conf), when)
+            step = handler(_opts(conf), when)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Condition check failed for %s: %s", conf, err)
             return self._step(kind, UNKNOWN, f"could not be checked: {err}")
+        finally:
+            reads, self._reads = self._reads, outer
+        unchanged = getattr(self.source, "unchanged", None)
+        if step.get("basis") == BaselineSource.basis and reads and unchanged and all(unchanged(*r) for r in reads):
+            step["basis"] = UNCHANGED_BASIS  # same value after startup: not an estimate
+        return step
 
     def _step(self, kind: str, result: str, why: str, basis: str | None = None) -> dict:
         step = {"condition": kind, "result": result, "why": why}
@@ -309,7 +425,8 @@ class ConditionEvaluator:
             step["basis"] = basis
         return step
 
-    def _past(self, entity_id: str, when: datetime | None) -> PastState | None:
+    def _past(self, entity_id: str, when: datetime | None, attribute: str | None = None) -> PastState | None:
+        self._reads.append((entity_id, attribute))
         return self.source.get(entity_id, when)
 
     # -------------------------------------------------------------- time / sun
@@ -416,7 +533,7 @@ class ConditionEvaluator:
         for_period = _as_timedelta(o.get("for"))
         results, reasons = [], []
         for eid in as_list(o.get("entity_id")):
-            past = self._past(eid, when)
+            past = self._past(eid, when, attribute)
             if past is None:
                 results.append(UNKNOWN)
                 reasons.append(f"{eid}: no recorded value")
@@ -476,7 +593,7 @@ class ConditionEvaluator:
         attribute = o.get("attribute")
         results, reasons = [], []
         for eid in as_list(o.get("entity_id")):
-            past = self._past(eid, when)
+            past = self._past(eid, when, attribute)
             known, value = self._value(past, attribute) if past else (False, None)
             if not known or value in UNKNOWN_STATES:
                 results.append(UNKNOWN)
@@ -505,6 +622,40 @@ class ConditionEvaluator:
             results.append(PASS if past.state in names else FAIL)
             reasons.append(f"{eid} was '{past.state}'")
         return self._step("zone", all_of(results), "; ".join(reasons) + " (by zone name)", self.source.basis)
+
+    def _c_actions(self, o: dict, when: datetime | None) -> dict:
+        """Would any action have run? `fail`: every gate (choose/if/condition step) fails."""
+        entries: list[tuple[str, list[dict], bool]] = []
+        shown: list[dict] = []
+        for item in o.get("items") or []:
+            kind = item["kind"]
+            if kind == "cond":
+                step = self._eval(item["conf"], when)
+                entries.append(("cond", [step], False))
+                shown.append(step)
+            elif kind == "branch":
+                options = []
+                for n, confs in enumerate(item["options"], 1):
+                    kids = [self._eval(c, when) for c in confs if _enabled(c)]
+                    label = "if" if item["label"] == "if" else f"choose option {n}"
+                    options.append({"condition": label, "result": all_of(k["result"] for k in kids), "conditions": kids})
+                entries.append(("branch", options, item["default"]))
+                shown.extend(options)
+            else:
+                entries.append((kind, [], False))
+        result = _gate(entries, lambda s: s["result"])
+        why = {
+            FAIL: "nothing would have run",
+            PASS: "would have run",
+            UNKNOWN: "can't tell whether anything would have run",
+        }[result]
+        return {
+            "condition": "actions",
+            "result": result,
+            "exact_result": _gate(entries, _without_estimates),
+            "why": why,
+            "conditions": shown,
+        }
 
     def _c_trigger(self, o: dict, when: datetime | None) -> dict:
         ids = [str(i) for i in as_list(o.get("id"))]
@@ -547,6 +698,11 @@ class ConditionEvaluator:
 def first_reason(steps: list[dict], result: str) -> str | None:
     """The first leaf step with `result`, as a sentence (for severity_reason)."""
     for step in steps:
+        if step.get("condition") == "actions":
+            if step["result"] != result:
+                continue
+            inner = first_reason(step.get("conditions") or [], result)
+            return f"actions: {step['why']}" + (f" ({inner})" if inner else "")
         if "conditions" in step:
             if step["result"] != result:
                 continue
@@ -608,8 +764,10 @@ def evaluate_finding(
 
 def _without_estimates(step: dict) -> str:
     """A step's result if every check based on estimated values were unknown."""
+    if step.get("condition") == "actions":
+        return step.get("exact_result", step["result"])
     if "conditions" in step:
-        combine = {"and": all_of, "or": any_of, "not": none_of}[step["condition"]]
+        combine = {"or": any_of, "not": none_of}.get(step["condition"], all_of)  # and, choose option, if
         return combine(_without_estimates(k) for k in step["conditions"])
     return UNKNOWN if step.get("basis") == BaselineSource.basis else step["result"]
 

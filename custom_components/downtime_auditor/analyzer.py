@@ -398,8 +398,21 @@ class Analyzer:
             return []
         pattern = "/".join(str(conf.get(k, "-")) for k in ("hours", "minutes", "seconds"))
         res = self._scheduled(ctx, occs, f"Time pattern (h/m/s {pattern})")
+        # The next tick after startup: a pattern that runs again soon has caught up on its own.
+        _n, nxt = schedule.time_pattern_occurrences(
+            self.window.end,
+            self.window.end + timedelta(days=1, seconds=1),
+            self.tz,
+            conf.get("hours"),
+            conf.get("minutes"),
+            conf.get("seconds"),
+            limit=1,
+        )
         for f in res:
             f.count = count if f.count == len(occs) else f.count
+            if nxt:
+                f.details["next_due"] = dt_util.as_local(nxt[0]).isoformat()
+                f.details["next_due_minutes"] = round((nxt[0] - self.window.end).total_seconds() / 60, 1)
         return res
 
     def _t_sun(self, ctx: dict) -> list[Finding]:

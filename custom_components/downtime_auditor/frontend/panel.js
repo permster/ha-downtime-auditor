@@ -590,6 +590,12 @@ class DowntimeAuditorPanel extends HTMLElement {
         parts.push(`<div class="kv"><div class="k">Rate this ${String(f.entity_id).startsWith("script.") ? "script" : "automation"}</div>
           <div class="v">${this._severityPicker(f)} <span class="muted small-inline">Saved as a <code>downtime_auditor_sev</code> label.</span></div></div>`);
       }
+      const only = children.length === 1 ? children[0] : children.length ? null : f;
+      const trigPicker = canRate && only ? this._triggerPicker(only, { label: false }) : "";
+      if (trigPicker) {
+        parts.push(`<div class="kv"><div class="k">Rate this trigger</div>
+          <div class="v">${trigPicker} <span class="muted small-inline">Overrides the automation's rating for this trigger only.</span></div></div>`);
+      }
     }
     if (f.confidence && !nested) {
       parts.push(`<div class="kv"><div class="k">Confidence</div><div class="v">${this._meter(f.confidence)} ${esc(CONF[f.confidence]?.label || f.confidence)}${
@@ -611,6 +617,7 @@ class DowntimeAuditorPanel extends HTMLElement {
         <span class="mini">${esc(JSON.stringify(d.before))}</span><span class="arrow">→</span><span class="mini">${esc(JSON.stringify(d.after))}</span>
         ${d.attribute ? `<span class="muted">attribute ${esc(d.attribute)}</span>` : ""}</div></div>`);
     }
+    if (d.next_due) parts.push(`<div class="kv"><div class="k">Runs again</div><div class="v">${esc(fmtTime(d.next_due))}${d.next_due_minutes != null ? ` <span class="muted">(${esc(Math.round(d.next_due_minutes))} min after Home Assistant started)</span>` : ""}</div></div>`);
     if (d.for != null) parts.push(`<div class="kv"><div class="k">for:</div><div class="v">${esc(fmtDur(d.for))}</div></div>`);
     if (d.above != null || d.below != null) parts.push(`<div class="kv"><div class="k">Range</div><div class="v">${d.above != null ? `&gt; ${esc(d.above)}` : ""} ${d.below != null ? `&lt; ${esc(d.below)}` : ""}</div></div>`);
     if (d.template) parts.push(`<div class="kv"><div class="k">Template</div><div class="v"><code>${esc(d.template)}</code></div></div>`);
@@ -641,7 +648,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     const ICON = { pass: "mdi:check-circle-outline", fail: "mdi:close-circle-outline", unknown: "mdi:help-circle-outline" };
     const basis = { baseline: "pre-downtime values", history: "recorder history", none: "no recorded states" }[c.basis] || c.basis;
     const step = (s) => `<li class="cs ${esc(s.result)}"><ha-icon icon="${ICON[s.result] || ICON.unknown}"></ha-icon>
-      <b>${esc(s.condition)}</b>${s.why ? ` — ${esc(s.why)}` : ""}${s.basis ? ` <span class="muted">(${esc({ baseline: "pre-downtime value", history: "history" }[s.basis] || s.basis)})</span>` : ""}
+      <b>${esc(s.condition)}</b>${s.why ? ` — ${esc(s.why)}` : ""}${s.basis ? ` <span class="muted">(${esc({ baseline: "pre-downtime value", unchanged: "same before and after the downtime", history: "history" }[s.basis] || s.basis)})</span>` : ""}
       ${s.conditions?.length ? `<ul>${s.conditions.map(step).join("")}</ul>` : ""}</li>`;
     const headline = c.likely === "fail"
       ? "Probably failed — based on pre-downtime values, which may have changed while HA was down"
@@ -822,17 +829,17 @@ class DowntimeAuditorPanel extends HTMLElement {
   }
 
   // Rate one trigger of an automation: overrides the automation's rating for that trigger only.
-  _triggerPicker(c) {
+  _triggerPicker(c, { label = true } = {}) {
     if (c.type !== "missed" || !String(c.entity_id || "").startsWith("automation.")) return "";
     if (c.trigger_id == null && c.trigger_index == null) return "";
     const which = { entity_id: c.entity_id, item_id: c.item_id ?? null, trigger_id: c.trigger_id ?? null,
                     trigger_index: c.trigger_index ?? null, platform: c.platform ?? null };
     const current = c.severity_source === "trigger" ? c.severity_base : "";
-    return `<label class="trig-rate">Rate this trigger
-      <select class="sev-select" data-rate-trigger="${esc(JSON.stringify(which))}" aria-label="Severity rating for this trigger">
+    const select = `<select class="sev-select" data-rate-trigger="${esc(JSON.stringify(which))}" aria-label="Severity rating for this trigger">
         <option value="" ${current ? "" : "selected"}>Automation's rating</option>
         ${SEVERITIES.map((s) => `<option value="${s.key}" ${current === s.key ? "selected" : ""}>${s.label}</option>`).join("")}
-      </select></label>`;
+      </select>`;
+    return label ? `<label class="trig-rate">Rate this trigger ${select}</label>` : select;
   }
 
   async _rateTrigger(which, severity) {

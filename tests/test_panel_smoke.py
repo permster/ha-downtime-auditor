@@ -53,7 +53,11 @@ async def test_panel_renders_real_reports(hass, enable_custom_integrations, hass
         {"id": "c", "alias": "Pattern", "triggers": [{"trigger": "time_pattern", "minutes": "/30"}], "actions": []},
     ]
     await async_setup_component(hass, "automation", {"automation": autos})
-    entry = MockConfigEntry(domain=DOMAIN, version=2, options={"startup_delay": 0, "write_json": True})
+    # Catch-up off: the fixture needs "Pattern" rated by its label (the rule has its own tests).
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2,
+        options={"startup_delay": 0, "write_json": True, "time_pattern_catch_up_minutes": 0},
+    )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -64,6 +68,8 @@ async def test_panel_renders_real_reports(hass, enable_custom_integrations, hass
     auditor = hass.data[DOMAIN]
     await auditor._async_on_shutdown()
     saved = copy.deepcopy(auditor.data)
+    # Switched on since the shutdown, so "off" in the baseline is only an estimate: Morning "probably failed".
+    await hass.services.async_call("input_boolean", "turn_on", {"entity_id": "input_boolean.vac"}, blocking=True)
     saved["session"]["shutdown_at"] = (dt_util.utcnow() - timedelta(hours=2)).isoformat()
     auditor.prev = saved
     auditor.started_at = dt_util.utcnow()

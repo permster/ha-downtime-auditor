@@ -69,6 +69,14 @@ def cmd_automations() -> None:
          "conditions": [{"condition": "time", "after": _hhmm(garden + timedelta(hours=2)),
                          "before": _hhmm(garden + timedelta(hours=6))}],
          "actions": []},
+        # Everything it does is inside a choose whose time window excludes the trigger time:
+        # nothing would have run → severity None.
+        {"id": "sd_card_sync", "alias": "SD card sync",
+         "triggers": [{"trigger": "time", "at": _hhmm(garden), "id": "sync"}],
+         "actions": [{"choose": [{"conditions": [{"condition": "trigger", "id": "sync"},
+                                                 {"condition": "time", "after": _hhmm(garden + timedelta(hours=2)),
+                                                  "before": _hhmm(garden + timedelta(hours=6))}],
+                                  "sequence": [{"delay": "00:00:01"}]}]}]},
         {"id": "garage_alert", "alias": "Garage left open alert",
          "triggers": [{"trigger": "state", "entity_id": "input_boolean.garage_door", "to": "on"}], "actions": []},
         {"id": "freezer_warm", "alias": "Freezer too warm",
