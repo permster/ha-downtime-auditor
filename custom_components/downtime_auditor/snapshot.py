@@ -62,6 +62,112 @@ def trigger_platform(conf: dict) -> str:
     return str(conf.get("platform") or conf.get("trigger") or "unknown")
 
 
+def _text(value: Any) -> str:
+    return str(getattr(value, "template", None) or value)
+
+
+def _names(value: Any, limit: int = 2) -> str:
+    items = [_text(v) for v in as_list(value)]
+    return ", ".join(items[:limit]) + (f" +{len(items) - limit}" if len(items) > limit else "")
+
+
+def _offset(value: Any) -> str:
+    """' −15 min' / ' +1 h 30 min' for a timedelta-ish offset; '' for none."""
+    if value in (None, "", 0):
+        return ""
+    if not isinstance(value, timedelta):
+        if isinstance(value, (int, float)):
+            value = timedelta(seconds=value)
+        else:
+            text = str(value).strip()
+            neg = text.startswith("-")
+            parts = [int(p) for p in text.lstrip("+-").split(":") if p.isdigit()]
+            if len(parts) != 3:
+                return f" {text}"
+            value = timedelta(hours=parts[0], minutes=parts[1], seconds=parts[2]) * (-1 if neg else 1)
+    secs = int(value.total_seconds())
+    if not secs:
+        return ""
+    sign, secs = ("−" if secs < 0 else "+"), abs(secs)
+    hours, rem = divmod(secs, 3600)
+    minutes, seconds = divmod(rem, 60)
+    out = [f"{hours} h" if hours else "", f"{minutes} min" if minutes else "", f"{seconds} s" if seconds else ""]
+    return f" {sign}" + " ".join(p for p in out if p)
+
+
+def _pattern(conf: dict) -> str:
+    """'every 5 seconds' for the usual /N patterns; else the raw h/m/s fields."""
+    h, m, s = (conf.get(k) for k in ("hours", "minutes", "seconds"))
+    units = (("hour", h, (m, s)), ("minute", m, (s,)), ("second", s, ()))
+    for i, (unit, value, smaller) in enumerate(units):
+        larger = [u[1] for u in units[:i]]
+        if (
+            isinstance(value, str)
+            and value.startswith("/")
+            and value[1:].isdigit()
+            and all(v in (None, "*") for v in larger)
+            and all(v in (None, 0, "0", "00") for v in smaller)
+        ):
+            n = int(value[1:])
+            return f"every {unit}" if n == 1 else f"every {n} {unit}s"
+    return "time pattern " + " ".join(f"{k}={conf[k]}" for k in ("hours", "minutes", "seconds") if conf.get(k) is not None)
+
+
+def describe_trigger(conf: dict) -> str:
+    """A short, human description of a trigger ('event doorbell_pressed', 'every 5 seconds', ...)."""
+    platform = trigger_platform(conf)
+    try:
+        if platform == "time_pattern":
+            return _pattern(conf)
+        if platform == "time":
+            ats = [a.get("entity_id", "") + _offset(a.get("offset")) if isinstance(a, dict) else _text(a)
+                   for a in as_list(conf.get("at"))]
+            return "time " + ", ".join(ats)
+        if platform == "event":
+            return "event " + _names(conf.get("event_type"))
+        if platform in ("state", "numeric_state"):
+            out = _names(conf.get("entity_id"))
+            if conf.get("attribute"):
+                out += f" [{conf['attribute']}]"
+            if platform == "numeric_state":
+                if conf.get("above") is not None:
+                    out += f" above {_text(conf['above'])}"
+                if conf.get("below") is not None:
+                    out += f" below {_text(conf['below'])}"
+            else:
+                if conf.get("from") is not None:
+                    out += f" from {_names(conf['from'], 3)}"
+                if conf.get("to") is not None:
+                    out += f" to {_names(conf['to'], 3)}"
+            if conf.get("for") is not None:
+                out += f" for {_text(conf['for'])}"
+            return out
+        if platform == "sun":
+            return f"{conf.get('event', 'sun')}{_offset(conf.get('offset'))}"
+        if platform == "mqtt":
+            return f"MQTT {conf.get('topic', '')}".strip()
+        if platform == "webhook":
+            return f"webhook {conf.get('webhook_id', '')}".strip()
+        if platform == "tag":
+            return f"tag {_names(conf.get('tag_id'))}"
+        if platform == "zone":
+            return f"{_names(conf.get('entity_id'))} {conf.get('event', 'enter')}s {conf.get('zone', '')}".strip()
+        if platform == "device":
+            what = " ".join(str(conf[k]) for k in ("domain", "type", "subtype") if conf.get(k))
+            return f"device {what}".strip()
+        if platform == "calendar":
+            return f"{conf.get('entity_id', 'calendar')} event {conf.get('event', 'start')}{_offset(conf.get('offset'))}"
+        if platform == "homeassistant":
+            return f"Home Assistant {conf.get('event', '')}".strip()
+        if platform == "conversation":
+            return "sentence " + ", ".join(f"“{c}”" for c in as_list(conf.get("command"))[:2])
+        if platform == "template":
+            return "template " + _text(conf.get("value_template", ""))[:60]
+    except Exception:  # noqa: BLE001  (a description must never break the analysis)
+        pass
+    return platform
+
+
 def trigger_enabled(conf: dict) -> bool:
     """Whether a trigger is enabled (templated 'enabled' treated as enabled)."""
     enabled = conf.get("enabled", True)

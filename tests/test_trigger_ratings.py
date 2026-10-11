@@ -14,6 +14,7 @@ from homeassistant.util import dt as dt_util
 from custom_components.downtime_auditor.const import DOMAIN, STORAGE_KEY, Severity
 from custom_components.downtime_auditor.labels import async_create_labels
 from custom_components.downtime_auditor.severity import effective_severity
+from custom_components.downtime_auditor.snapshot import describe_trigger
 
 
 @pytest.mark.parametrize(
@@ -130,3 +131,39 @@ async def test_changing_the_option_rerates_the_report(hass, enable_custom_integr
     await hass.async_block_till_done()  # the entry reloads and re-rates
     _group, by = _triggers(hass.data[DOMAIN])
     assert by["event"]["severity"] == "none"
+
+
+# ---------------------------------------------------------------- which trigger (for rating it)
+
+
+@pytest.mark.parametrize(
+    ("conf", "expected"),
+    [
+        ({"trigger": "time_pattern", "seconds": "/5"}, "every 5 seconds"),
+        ({"trigger": "time_pattern", "minutes": "/15"}, "every 15 minutes"),
+        ({"trigger": "time_pattern", "minutes": "/1"}, "every minute"),
+        ({"trigger": "time_pattern", "hours": "/2"}, "every 2 hours"),
+        ({"trigger": "time_pattern", "hours": "/2", "minutes": 30}, "time pattern hours=/2 minutes=30"),
+        ({"trigger": "time", "at": "07:00:00"}, "time 07:00:00"),
+        ({"trigger": "time", "at": {"entity_id": "sensor.alarm", "offset": "-00:05:00"}}, "time sensor.alarm −5 min"),
+        ({"trigger": "event", "event_type": "doorbell_pressed"}, "event doorbell_pressed"),
+        ({"trigger": "state", "entity_id": "cover.garage", "to": "open"}, "cover.garage to open"),
+        ({"trigger": "state", "entity_id": ["a.a", "b.b", "c.c"], "from": "off"}, "a.a, b.b +1 from off"),
+        ({"trigger": "numeric_state", "entity_id": "sensor.t", "above": -10}, "sensor.t above -10"),
+        ({"platform": "sun", "event": "sunset", "offset": timedelta(minutes=-15)}, "sunset −15 min"),
+        ({"trigger": "sun", "event": "sunrise", "offset": "01:30:00"}, "sunrise +1 h 30 min"),
+        ({"trigger": "mqtt", "topic": "home/door"}, "MQTT home/door"),
+        ({"trigger": "device", "domain": "zha", "type": "remote_button_short_press", "subtype": "turn_on"},
+         "device zha remote_button_short_press turn_on"),
+        ({"trigger": "something_new"}, "something_new"),
+    ],
+)
+def test_describe_trigger(conf, expected):
+    assert describe_trigger(conf) == expected
+
+
+async def test_findings_say_which_trigger(hass, enable_custom_integrations):
+    _entry, auditor = await _setup(hass, {})
+    _group, by = _triggers(auditor)
+    assert (by["event"]["details"]["trigger"], by["event"]["details"]["trigger_of"]) == ("event doorbell_pressed", 2)
+    assert by["time"]["details"]["trigger"].startswith("time ")

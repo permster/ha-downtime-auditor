@@ -28,6 +28,7 @@ const TABS = [
   { key: "history", label: "History", icon: "mdi:history" },
   { key: "live", label: "Live status", icon: "mdi:heart-pulse" },
   { key: "whatif", label: "What-if", icon: "mdi:flask-outline" },
+  { key: "rules", label: "Rules", icon: "mdi:scale-balance" },
 ];
 const SOURCE_TEXT = { label: "set by label", default: "unrated (default)", trigger: "set for this trigger" };
 const DENSE_OCCURRENCES = 40; // more due times than this are drawn as a span on the timeline
@@ -219,6 +220,7 @@ class DowntimeAuditorPanel extends HTMLElement {
       this._runSig = this._runSignature(this._hass); // baseline, so the very next change counts
       this._loadStatus();
     }
+    if (t === "rules") this._loadStatus();
     this._render();
   }
 
@@ -291,6 +293,7 @@ class DowntimeAuditorPanel extends HTMLElement {
       case "history": return this._historyView();
       case "live": return this._liveView();
       case "whatif": return this._whatIfView();
+      case "rules": return this._rulesView();
       default: return this._reportView(this._report, { viewingFile: STATE.viewingFile });
     }
   }
@@ -555,9 +558,50 @@ class DowntimeAuditorPanel extends HTMLElement {
     if (!rateable) return "";
     const current = f.severity_source === "label" ? (f.severity_base || f.severity) : "";
     return `<select class="sev-select" data-rate="${esc(f.entity_id)}" aria-label="Severity rating for ${esc(f.name)}">
-      <option value="" ${current ? "" : "selected"}>Unrated (Medium)</option>
+      <option value="" ${current ? "" : "selected"}>Unrated (starts at Medium)</option>
       ${SEVERITIES.map((s) => `<option value="${s.key}" ${current === s.key ? "selected" : ""}>${s.label}</option>`).join("")}
     </select>`;
+  }
+
+  // "Medium (unrated) → None: the pattern runs again …" when a rule changed the starting rating.
+  _severityWhy(f) {
+    const reason = f.severity_reason || SOURCE_TEXT[f.severity_source] || "";
+    if (!f.severity_base || !SEV[f.severity_base] || f.severity_base === f.severity) return reason;
+    const from = { label: "label", default: "unrated", trigger: "this trigger" }[f.severity_source] || f.severity_source;
+    const short = reason.replace(/\s*\((Critical|High|Medium|Low|None) [^)]*\)$/, ""); // drop the "(Medium default …)" repeat
+    return `${SEV[f.severity_base].label} (${from}) → ${SEV[f.severity]?.label || f.severity}: ${short}`;
+  }
+
+  // How severity is decided, from the backend's own rule list and the current options.
+  _rulesView() {
+    const s = this._status;
+    const r = s?.severity_rules;
+    if (!r) return `<div class="empty">Loading…</div>`;
+    const sevLabel = (k) => SEV[k]?.label || k;
+    const rule = (x) => `<li class="rule ${x.on ? "" : "off"}">
+        <ha-icon icon="${x.on ? "mdi:check-circle-outline" : "mdi:minus-circle-outline"}"></ha-icon>
+        <div><span>${esc(x.when)}</span> <b>→ ${esc(x.on ? x.then : "off")}</b>${x.option
+          ? ` <span class="muted">(${esc(x.option)}: ${esc(x.value)})</span>` : ""}</div></li>`;
+    return `<div class="card rules-card"><h3>How severity is decided</h3>
+      <p class="muted">Every finding starts with a rating, then the rules below adjust it, in this order. They follow your current options.</p>
+      <h4>1. Starting rating</h4>
+      <ol class="rule-start">${r.start.map((x) => `<li>${esc(x.text)}</li>`).join("")}</ol>
+      <h4>2. Adjustments, in this order</h4>
+      <ul class="rule-list">${r.adjust.map(rule).join("")}</ul>
+      <h4>3. What happens next</h4>
+      <p>Repairs: <b>${esc(sevLabel(s.repairs_min_severity))}</b> and up · push: <b>${esc(sevLabel(s.push_min_severity))}</b> and up ·
+        severity None: ${s.show_severity_none ? "shown" : "hidden"} on the dashboard by default.</p>
+      <a class="btn secondary" href="/config/integrations/integration/downtime_auditor" data-nav>Change options</a>
+    </div>`;
+  }
+
+  // "2 of 3 · event doorbell_pressed (id “bell”)": which trigger, in words (older reports: platform and #).
+  _triggerLabel(c) {
+    const d = c.details || {};
+    if (c.type !== "missed" || (c.trigger_index == null && c.trigger_id == null && !d.trigger)) return "";
+    const pos = d.trigger_of > 1 && c.trigger_index != null ? `${c.trigger_index + 1} of ${d.trigger_of} · ` : "";
+    const what = d.trigger || [c.platform, c.trigger_index != null ? `#${c.trigger_index}` : ""].filter(Boolean).join(" ");
+    return `${pos}${what}${c.trigger_id ? ` (id “${c.trigger_id}”)` : ""}`;
   }
 
   // One trigger of a multi-trigger finding: its own severity, confidence and evidence.
@@ -570,6 +614,7 @@ class DowntimeAuditorPanel extends HTMLElement {
         ${c.confidence && CONF[c.confidence] ? `<span class="conf-inline">${this._meter(c.confidence)} ${esc(CONF[c.confidence].label)}</span>` : ""}
         ${c.platform ? `<span class="tag">${esc(c.platform)}</span>` : ""}${trig ? `<span class="tag">${trig}</span>` : ""}
       </div>
+      ${this._triggerLabel(c) ? `<div class="trig-what">${esc(this._triggerLabel(c))}</div>` : ""}
       <div class="trig-sum">${esc(c.summary)}</div>
       ${canRate ? this._triggerPicker(c) : ""}
       ${this._details(c, { nested: true })}
@@ -585,12 +630,14 @@ class DowntimeAuditorPanel extends HTMLElement {
     } else if (f.severity) {
       parts.push(`<div class="kv"><div class="k">Severity</div><div class="v sev-line">
         <span class="sev-badge" style="--s:${SEV[f.severity]?.color}">${esc(SEV[f.severity]?.label || f.severity)}</span>
-        <span class="muted">${esc(f.severity_reason || SOURCE_TEXT[f.severity_source] || "")}</span></div></div>`);
+        <span class="muted">${esc(this._severityWhy(f))} · <a href="#" data-tab="rules">How is this decided?</a></span></div></div>`);
       if (canRate && this._severityPicker(f)) {
         parts.push(`<div class="kv"><div class="k">Rate this ${String(f.entity_id).startsWith("script.") ? "script" : "automation"}</div>
           <div class="v">${this._severityPicker(f)} <span class="muted small-inline">Saved as a <code>downtime_auditor_sev</code> label.</span></div></div>`);
       }
       const only = children.length === 1 ? children[0] : children.length ? null : f;
+      const trigLabel = only ? this._triggerLabel(only) : "";
+      if (trigLabel) parts.push(`<div class="kv"><div class="k">Trigger</div><div class="v">${esc(trigLabel)}</div></div>`);
       const trigPicker = canRate && only ? this._triggerPicker(only, { label: false }) : "";
       if (trigPicker) {
         parts.push(`<div class="kv"><div class="k">Rate this trigger</div>
@@ -617,7 +664,7 @@ class DowntimeAuditorPanel extends HTMLElement {
         <span class="mini">${esc(JSON.stringify(d.before))}</span><span class="arrow">→</span><span class="mini">${esc(JSON.stringify(d.after))}</span>
         ${d.attribute ? `<span class="muted">attribute ${esc(d.attribute)}</span>` : ""}</div></div>`);
     }
-    if (d.next_due) parts.push(`<div class="kv"><div class="k">Runs again</div><div class="v">${esc(fmtTime(d.next_due))}${d.next_due_minutes != null ? ` <span class="muted">(${esc(Math.round(d.next_due_minutes))} min after Home Assistant started)</span>` : ""}</div></div>`);
+    if (d.next_due) parts.push(`<div class="kv"><div class="k">Runs again</div><div class="v">${esc(fmtTime(d.next_due))}${d.next_due_minutes != null ? ` <span class="muted">(${d.next_due_minutes < 1 ? "under a minute" : `${esc(Math.round(d.next_due_minutes))} min`} after Home Assistant started)</span>` : ""}</div></div>`);
     if (d.for != null) parts.push(`<div class="kv"><div class="k">for:</div><div class="v">${esc(fmtDur(d.for))}</div></div>`);
     if (d.above != null || d.below != null) parts.push(`<div class="kv"><div class="k">Range</div><div class="v">${d.above != null ? `&gt; ${esc(d.above)}` : ""} ${d.below != null ? `&lt; ${esc(d.below)}` : ""}</div></div>`);
     if (d.template) parts.push(`<div class="kv"><div class="k">Template</div><div class="v"><code>${esc(d.template)}</code></div></div>`);
@@ -986,6 +1033,15 @@ svg text.count { font-size: 10px; }
 .trig-list { display: flex; flex-direction: column; gap: 8px; }
 .trig { border: 1px solid var(--da-line); border-radius: 8px; padding: 8px 10px; }
 .trig-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.trig-what { margin-top: 4px; font-weight: 500; overflow-wrap: anywhere; }
+.rules-card h4 { margin: 16px 0 6px; }
+.rule-start { margin: 0; padding-left: 22px; }
+.rule-list { list-style: none; margin: 0; padding: 0; }
+.rule { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid var(--divider-color, #e0e0e0); overflow-wrap: anywhere; }
+.rule:last-child { border-bottom: none; }
+.rule ha-icon { --mdc-icon-size: 18px; flex: none; color: var(--success-color, #43a047); }
+.rule.off { opacity: .6; }
+.rule.off ha-icon { color: var(--secondary-text-color); }
 .trig-sum { margin: 4px 0 2px; overflow-wrap: anywhere; }
 .trig-rate { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; color: var(--da-muted); }
 .trig .kv { grid-template-columns: 100px 1fr; }

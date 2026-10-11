@@ -98,7 +98,7 @@ const tick = () => new Promise((r) => setImmediate(r));
   html = p.shadowRoot.innerHTML;
   assert(html.includes("Probably failed — based on pre-downtime values"), "condition headline");
   assert(html.includes('class="cond-tree"') && html.includes("<b>or</b>"), "condition breakdown tree");
-  assert(html.includes('data-rate="automation.morning"') && html.includes("Unrated (Medium)"), "severity picker");
+  assert(html.includes('data-rate="automation.morning"') && html.includes("Unrated (starts at Medium)"), "severity picker");
   assert(/href="\/config\/automation\/edit\/a" data-nav/.test(html), "real Edit link");
   assert(/href="\/config\/automation\/trace\/a" data-nav/.test(html), "real Traces link");
   const pattern = fixture.report.findings.find((f) => f.name === "Pattern");
@@ -107,6 +107,7 @@ const tick = () => new Promise((r) => setImmediate(r));
   html = p.shadowRoot.innerHTML;
   assert(/<option value="high" selected>High<\/option>/.test(html), "picker shows the label rating");
   assert(html.includes('<div class="k">Rate this trigger</div>'), "single-trigger findings can rate their trigger too");
+  assert(html.includes('<div class="k">Trigger</div><div class="v">every 30 minutes</div>'), "which trigger, in words");
   assert.strictEqual((html.match(/data-rate-trigger=/g) || []).length, 2, "one trigger selector each for Morning and Pattern");
 
   // ---- a multi-trigger automation is one row, with its triggers listed when expanded
@@ -118,12 +119,26 @@ const tick = () => new Promise((r) => setImmediate(r));
   p._render();
   html = p.shadowRoot.innerHTML;
   assert(html.includes('<div class="k">Triggers (2)</div>'), "trigger list in the details");
+  assert(html.includes('<div class="trig-what">1 of 2 · event x</div>') && html.includes('<div class="trig-what">2 of 2 · event y</div>'),
+    "each listed trigger says which one it is");
   assert.strictEqual((html.match(/class="trig"/g) || []).length, 2, "both triggers listed");
+  assert(html.includes("Medium (unrated) → Low: can&#39;t be confirmed, so capped at Low ·")
+    || html.includes("Medium (unrated) → Low: can't be confirmed, so capped at Low ·"), "starting rating → result");
+  assert(html.includes('<a href="#" data-tab="rules">How is this decided?</a>'), "link to the rules");
   assert.strictEqual((html.match(/data-rate-trigger=/g) || []).length, 4, "a rating selector per trigger (Evt's 2 + Morning's + Pattern's)");
   assert(html.includes("Automation&#39;s rating") || html.includes("Automation's rating"), "default = automation's rating");
   await p._rateTrigger({ entity_id: "automation.evt", item_id: "b", trigger_id: null, trigger_index: 1, platform: "event" }, "none");
   const trig = sent.filter((m) => m.type.endsWith("set_trigger_severity")).pop();
   assert.deepStrictEqual([trig.trigger_index, trig.platform, trig.severity], [1, "event", "none"], "trigger rating sent");
+
+  // ---- the Rules tab: from the backend's rule list and the current options
+  p._setTab("rules");
+  await new Promise((r) => setTimeout(r, 0));
+  html = p.shadowRoot.innerHTML;
+  assert(html.includes("How severity is decided") && html.includes("otherwise Medium (unrated)"), "rules: starting rating");
+  assert(html.includes("(Time patterns that run again soon: off)"), "rules: an option that's off says so");
+  assert((html.match(/class="rule /g) || []).length === fixture.status.severity_rules.adjust.length, "rules: every adjustment listed");
+  p._setTab("report");
 
   // ---- filters
   STATE.minSeverity = "high";

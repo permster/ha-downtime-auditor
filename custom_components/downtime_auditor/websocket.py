@@ -18,6 +18,8 @@ from .const import (
     CONF_PUSH_MIN_SEVERITY,
     CONF_REPAIRS_MIN_SEVERITY,
     CONF_SHOW_SEVERITY_NONE,
+    CONF_TIME_PATTERN_CATCH_UP,
+    CONF_UNCONFIRMABLE_SEVERITY,
     DOMAIN,
     HISTORY_FILE,
     REPORT_DIR,
@@ -25,6 +27,7 @@ from .const import (
 )
 from .labels import async_create_labels, async_set_severity
 from .report import upgrade_legacy
+from .severity import severity_rules
 from .snapshot import capture_running
 
 REPORT_FILE_RE = re.compile(r"^report-\d{8}-\d{6}(-\d{1,4})?\.json$")
@@ -75,6 +78,9 @@ def ws_status(hass: HomeAssistant, connection: websocket_api.ActiveConnection, m
             "repairs_min_severity": auditor.opt(CONF_REPAIRS_MIN_SEVERITY),
             "push_min_severity": auditor.opt(CONF_PUSH_MIN_SEVERITY),
             "show_severity_none": bool(auditor.opt(CONF_SHOW_SEVERITY_NONE)),
+            "severity_rules": severity_rules(
+                auditor.opt(CONF_UNCONFIRMABLE_SEVERITY), int(auditor.opt(CONF_TIME_PATTERN_CATCH_UP) or 0)
+            ),
             "now": dt_util.utcnow().isoformat(),
         },
     )

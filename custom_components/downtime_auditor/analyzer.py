@@ -21,6 +21,7 @@ from .const import (
 from .snapshot import (
     as_list,
     automation_entities,
+    describe_trigger,
     jsonable,
     render_bool,
     render_number,
@@ -210,7 +211,8 @@ class Analyzer:
         fired_after_start = bool(startup_triggered.get(entity_id))
         out: list[Finding] = []
 
-        for idx, conf in enumerate(trigger_configs(ent)):
+        confs = trigger_configs(ent)
+        for idx, conf in enumerate(confs):
             if not trigger_enabled(conf):
                 continue
             platform = trigger_platform(conf)
@@ -219,6 +221,7 @@ class Analyzer:
                 "entity_id": entity_id,
                 "name": name,
                 "idx": idx,
+                "of": len(confs),
                 "conf": conf,
                 "platform": platform,
                 "trigger_id": str(conf["id"]) if conf.get("id") is not None else None,
@@ -263,6 +266,7 @@ class Analyzer:
             "entity_id": auto_id,
             "name": pending.get("name") or auto_id,
             "idx": idx,
+            "of": len(confs),
             "conf": conf,
             "platform": platform,
             "trigger_id": str(conf["id"]) if conf.get("id") is not None else None,
@@ -281,6 +285,11 @@ class Analyzer:
         return (results[0] if results else None), still_unknown
 
     def _mk(self, ctx: dict, finding_type: str, confidence: str, summary: str, **kw: Any) -> Finding:
+        # Which trigger this is, in words, and its position (so a per-trigger rating is clear).
+        details = kw.get("details")
+        if details is None:
+            details = kw["details"] = {}
+        details.update(trigger=describe_trigger(ctx["conf"]), trigger_of=ctx.get("of"))
         return Finding(
             type=finding_type,
             confidence=confidence,

@@ -15,13 +15,14 @@ It only reports. It never re-runs anything.
 
 Results show up in four places:
 
-1. **A sidebar dashboard** (admins only) with four tabs:
-   - **Last report:** a summary, type tiles and filters (minimum severity, confidence, show None), a timeline of the downtime colored by severity, and a searchable list of findings. Each finding expands to show its severity and why, a selector to rate the automation, the condition check, before/after values, due times and the step a run stopped at, with links to the automation's editor and traces (Ctrl/middle-click opens a new tab). The dashboard remembers where you were when you come back from the editor.
+1. **A sidebar dashboard** (admins only) with five tabs:
+   - **Last report:** a summary, type tiles and filters (minimum severity, confidence, show None), a timeline of the downtime colored by severity, and a searchable list of findings. Each finding expands to show its severity and why (the starting rating and the rule that changed it, if any), which trigger it is in words (such as *2 of 3 · event doorbell_pressed*), selectors to rate the automation and the trigger, the condition check, before/after values, due times and the step a run stopped at, with links to the automation's editor and traces (Ctrl/middle-click opens a new tab). The dashboard remembers where you were when you come back from the editor.
    - **History:** every restart, with a duration chart. Click an entry to open its full report.
    - **Live status:** heartbeat health, what's running right now (what *would* be interrupted if HA stopped this instant, with how long it has been running and the step it's on; it updates as soon as an automation or script starts or finishes), and a button to create the severity labels.
+   - **What-if:** pick any time window and see which scheduled triggers a downtime then would miss.
+   - **Rules:** how severity is decided, with your current options: where the starting rating comes from, then each adjustment in the order it's applied (and which ones are off).
 
    Right after a restart, the dashboard shows when the new report will be ready (it waits for the *startup settle delay* first), and updates by itself when it arrives. If the integration was updated while the page was open, it asks you to reload.
-   - **What-if:** pick any time window and see which scheduled triggers a downtime then would miss.
 2. **Settings → Repairs:** one issue per automation or script with a finding at or above a minimum severity (all its missed triggers are listed in the issue), the way Spook raises its issues. Previous issues are replaced by each new report. You can ignore them individually or clear them with a service.
 3. **Entities** (Watchman-style) on a *Downtime Auditor* device: one count sensor per finding type, with the findings in a `findings` attribute (excluded from the recorder), a highest-severity sensor, duration and timestamp sensors, and problem binary sensors.
 4. **JSON history** under `/config/downtime_auditor/` (see [History and retention](#history-and-retention)), plus an optional phone push. A persistent notification is also available but is off by default.
@@ -117,7 +118,7 @@ A rating takes effect straight away, whether you set it on the dashboard or in H
 
 Labels aren't created up front, so tools like Spook don't flag them as unused. You can delete one that isn't on anything; picking that rating again recreates it.
 
-The rating is then adjusted per finding:
+The rating is then adjusted per finding. The dashboard's **Rules** tab lists these with your current options, and each finding shows its starting rating and the rule that changed it (for example *Medium (unrated) → None: the pattern runs again under a minute after Home Assistant started*):
 
 - **Conditions would have failed** → None. This includes actions that would all have been skipped (see [Condition checks](#condition-checks)).
 - **A time pattern that runs again soon** → None. A missed `/15` tick is only a delay: the pattern runs again within minutes of startup. Ticks whose next run is within *Time patterns that run again soon* (60 minutes by default) of Home Assistant starting are None; slower patterns keep their rating.
