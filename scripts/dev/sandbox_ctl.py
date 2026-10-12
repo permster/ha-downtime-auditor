@@ -77,6 +77,24 @@ def cmd_automations() -> None:
                                                  {"condition": "time", "after": _hhmm(garden + timedelta(hours=2)),
                                                   "before": _hhmm(garden + timedelta(hours=6))}],
                                   "sequence": [{"delay": "00:00:01"}]}]}]},
+        # A controller clock that keeps ticking (like a pool controller's time sensor) ...
+        {"id": "pool_clock_tick", "alias": "Pool clock tick",
+         "triggers": [{"trigger": "time_pattern", "seconds": "/15"}],
+         "actions": [{"action": "input_text.set_value", "target": {"entity_id": "input_text.pool_clock"},
+                      "data": {"value": "{{ now().strftime('%H:%M:%S') }}"}}]},
+        # ... watched for going stale with `for:`. It ticks again right after startup, so it couldn't
+        # have held 5 minutes: dropped. The choose options are named by alias / what they'd do.
+        {"id": "pool_clock_stale", "alias": "Pool clock stale",
+         "triggers": [{"trigger": "state", "entity_id": "input_text.pool_clock", "for": "00:05:00", "id": "time_stale"}],
+         "actions": [{"choose": [
+             {"conditions": [{"condition": "trigger", "id": "other"}], "sequence": [{"delay": "00:00:01"}]},
+             {"alias": "Resync pool clock", "conditions": [{"condition": "trigger", "id": "time_stale"}],
+              "sequence": [{"action": "input_boolean.turn_on", "target": {"entity_id": "input_boolean.guest_mode"}}]},
+         ]}]},
+        # The garage is opened while HA is down and stays open: held 2 minutes → would have fired (Confirmed).
+        {"id": "garage_open_2min", "alias": "Garage open 2 min",
+         "triggers": [{"trigger": "state", "entity_id": "input_boolean.garage_door", "to": "on", "for": "00:02:00"}],
+         "actions": []},
         {"id": "garage_alert", "alias": "Garage left open alert",
          "triggers": [{"trigger": "state", "entity_id": "input_boolean.garage_door", "to": "on"}], "actions": []},
         {"id": "freezer_warm", "alias": "Freezer too warm",

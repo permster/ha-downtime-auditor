@@ -139,22 +139,29 @@ async def test_changing_the_option_rerates_the_report(hass, enable_custom_integr
 @pytest.mark.parametrize(
     ("conf", "expected"),
     [
-        ({"trigger": "time_pattern", "seconds": "/5"}, "every 5 seconds"),
-        ({"trigger": "time_pattern", "minutes": "/15"}, "every 15 minutes"),
-        ({"trigger": "time_pattern", "minutes": "/1"}, "every minute"),
-        ({"trigger": "time_pattern", "hours": "/2"}, "every 2 hours"),
-        ({"trigger": "time_pattern", "hours": "/2", "minutes": 30}, "time pattern hours=/2 minutes=30"),
-        ({"trigger": "time", "at": "07:00:00"}, "time 07:00:00"),
-        ({"trigger": "time", "at": {"entity_id": "sensor.alarm", "offset": "-00:05:00"}}, "time sensor.alarm −5 min"),
-        ({"trigger": "event", "event_type": "doorbell_pressed"}, "event doorbell_pressed"),
-        ({"trigger": "state", "entity_id": "cover.garage", "to": "open"}, "cover.garage to open"),
-        ({"trigger": "state", "entity_id": ["a.a", "b.b", "c.c"], "from": "off"}, "a.a, b.b +1 from off"),
-        ({"trigger": "numeric_state", "entity_id": "sensor.t", "above": -10}, "sensor.t above -10"),
-        ({"platform": "sun", "event": "sunset", "offset": timedelta(minutes=-15)}, "sunset −15 min"),
-        ({"trigger": "sun", "event": "sunrise", "offset": "01:30:00"}, "sunrise +1 h 30 min"),
-        ({"trigger": "mqtt", "topic": "home/door"}, "MQTT home/door"),
+        ({"trigger": "time_pattern", "seconds": "/5"}, "Time pattern: every 5 seconds"),
+        ({"trigger": "time_pattern", "minutes": "/15"}, "Time pattern: every 15 minutes"),
+        ({"trigger": "time_pattern", "minutes": "/1"}, "Time pattern: every minute"),
+        ({"trigger": "time_pattern", "hours": "/2"}, "Time pattern: every 2 hours"),
+        ({"trigger": "time_pattern", "hours": "/2", "minutes": 30}, "Time pattern: hours=/2 minutes=30"),
+        ({"trigger": "time", "at": "07:00:00"}, "Time: 07:00"),
+        ({"trigger": "time", "at": {"entity_id": "sensor.alarm", "offset": "-00:05:00"}}, "Time: sensor.alarm −5 min"),
+        ({"trigger": "event", "event_type": "doorbell_pressed"}, "Event: doorbell_pressed"),
+        ({"trigger": "state", "entity_id": "cover.garage", "to": "open"}, "State: cover.garage changes to open"),
+        ({"trigger": "state", "entity_id": ["a.a", "b.b", "c.c"], "from": "off"}, "State: a.a, b.b +1 changes from off"),
+        # The field case: a clock sensor watched for going stale.
+        ({"trigger": "state", "entity_id": "sensor.opnpool_time", "for": timedelta(minutes=5)},
+         "State: sensor.opnpool_time changes, then holds for 5 min"),
+        ({"trigger": "state", "entity_id": "binary_sensor.door", "to": "on", "for": {"hours": 1, "minutes": 30}},
+         "State: binary_sensor.door changes to on, then holds for 1 h 30 min"),
+        ({"trigger": "numeric_state", "entity_id": "sensor.t", "above": -10}, "Numeric state: sensor.t goes above -10"),
+        ({"trigger": "numeric_state", "entity_id": "sensor.t", "above": 1, "below": 5, "for": "00:00:30"},
+         "Numeric state: sensor.t goes above 1 and below 5, then stays for 30 s"),
+        ({"platform": "sun", "event": "sunset", "offset": timedelta(minutes=-15)}, "Sun: sunset −15 min"),
+        ({"trigger": "sun", "event": "sunrise", "offset": "01:30:00"}, "Sun: sunrise +1 h 30 min"),
+        ({"trigger": "mqtt", "topic": "home/door"}, "MQTT: home/door"),
         ({"trigger": "device", "domain": "zha", "type": "remote_button_short_press", "subtype": "turn_on"},
-         "device zha remote_button_short_press turn_on"),
+         "Device: zha remote_button_short_press turn_on"),
         ({"trigger": "something_new"}, "something_new"),
     ],
 )
@@ -165,5 +172,5 @@ def test_describe_trigger(conf, expected):
 async def test_findings_say_which_trigger(hass, enable_custom_integrations):
     _entry, auditor = await _setup(hass, {})
     _group, by = _triggers(auditor)
-    assert (by["event"]["details"]["trigger"], by["event"]["details"]["trigger_of"]) == ("event doorbell_pressed", 2)
-    assert by["time"]["details"]["trigger"].startswith("time ")
+    assert (by["event"]["details"]["trigger"], by["event"]["details"]["trigger_of"]) == ("Event: doorbell_pressed", 2)
+    assert by["time"]["details"]["trigger"].startswith("Time: ")

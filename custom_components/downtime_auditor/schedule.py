@@ -157,3 +157,18 @@ def fmt_duration(seconds: float) -> str:
         return f"{hours}h {minutes}m"
     days, hours = divmod(hours, 24)
     return f"{days}d {hours}h"
+
+
+def fmt_period(seconds: float) -> str:
+    """'5 min', '30 s', '1 h 30 min', '2 days' — for `for:` periods and offsets."""
+    seconds = int(round(abs(seconds)))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = [
+        f"{days} day{'s' if days != 1 else ''}" if days else "",
+        f"{hours} h" if hours else "",
+        f"{minutes} min" if minutes else "",
+        f"{secs} s" if secs else "",
+    ]
+    return " ".join(p for p in parts if p) or "0 s"

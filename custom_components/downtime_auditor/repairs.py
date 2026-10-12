@@ -9,6 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 
 from .const import CONFIDENCE_LABELS, DOMAIN, PANEL_URL, SEVERITY_LABELS, Severity
+from .schedule import fmt_period
 from .severity import at_least
 
 MAX_ISSUES = 50
@@ -36,13 +37,20 @@ def _detail_text(finding: dict) -> str:
         return "\n".join(f"- {line}" for line in lines)
     d = finding.get("details") or {}
     lines: list[str] = []
+    if d.get("trigger"):
+        lines.append(f"Trigger: {d['trigger']}")
     if finding.get("occurrences"):
         occ = finding["occurrences"]
         lines.append("Due at: " + ", ".join(occ[:10]) + (" …" if len(occ) > 10 else ""))
     if "before" in d or "after" in d:
-        lines.append(f"Before downtime: `{d.get('before')}` · After: `{d.get('after')}`")
-    if d.get("for") is not None:
-        lines.append(f"`for:` {d['for']}")
+        who = f"{d['entity']}: " if d.get("entity") else ""
+        lines.append(f"{who}`{d.get('before')}` before the downtime → `{d.get('after')}` after startup")
+    hold = d.get("hold_check") or {}
+    if hold.get("why") and hold.get("result") != "pending":
+        lines.append(f"Held long enough? {hold['why']}")
+    elif d.get("for") is not None and not d.get("trigger"):
+        period = fmt_period(d["for"]) if isinstance(d["for"], (int, float)) else d["for"]
+        lines.append(f"`for:` {period}")
     for run in d.get("runs") or []:
         if isinstance(run, dict) and run.get("last_step"):
             lines.append(f"Stopped at `{run['last_step']}` (run {str(run.get('run_id'))[:8]})")

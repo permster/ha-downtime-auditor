@@ -41,3 +41,7 @@ input_number:
     max: 10
     step: 0.5
     unit_of_measurement: "°C"
+
+input_text:
+  pool_clock:
+    name: Pool controller clock

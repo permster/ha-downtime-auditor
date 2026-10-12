@@ -211,15 +211,18 @@ def _gate_items(seq: Any) -> list[dict]:
             items.append({"kind": "cond", "conf": step})
         elif "choose" in step:
             options = [
-                _gate_conds(o.get("conditions"))
+                {"conds": _gate_conds(o.get("conditions")), "alias": o.get("alias"), "does": describe_actions(o.get("sequence"))}
                 for o in as_list(step["choose"])
                 if isinstance(o, dict) and _enabled(o)
             ]
             items.append({"kind": "branch", "label": "choose", "options": options,
-                          "default": bool(as_list(step.get("default")))})
+                          "default": bool(as_list(step.get("default"))),
+                          "default_does": describe_actions(step.get("default"))})
         elif "if" in step:
-            items.append({"kind": "branch", "label": "if", "options": [_gate_conds(step["if"])],
-                          "default": bool(as_list(step.get("else")))})
+            option = {"conds": _gate_conds(step["if"]), "alias": step.get("alias"), "does": describe_actions(step.get("then"))}
+            items.append({"kind": "branch", "label": "if", "options": [option],
+                          "default": bool(as_list(step.get("else"))),
+                          "default_does": describe_actions(step.get("else"))})
         elif "variables" in step:
             continue
         elif "stop" in step:
@@ -229,6 +232,36 @@ def _gate_items(seq: Any) -> list[dict]:
             items.append({"kind": "run"})
             break
     return items
+
+
+def describe_actions(seq: Any) -> str | None:
+    """What a sequence does, from its first step: its alias, or e.g. 'script.opnpool_resync'."""
+    steps = [s for s in as_list(seq) if isinstance(s, dict) and _enabled(s) and "variables" not in s]
+    if not steps:
+        return None
+    step, more = steps[0], len(steps) - 1
+    if step.get("alias"):
+        what = str(step["alias"])
+    elif step.get("action") or step.get("service"):
+        what = str(step.get("action") or step.get("service"))
+        target = {**(step.get("data") or {}), **(step.get("target") or {})}
+        if ents := as_list(target.get("entity_id")):
+            what += " " + ", ".join(map(str, ents[:2])) + (" …" if len(ents) > 2 else "")
+    elif "delay" in step:
+        what = "wait"
+    elif "scene" in step:
+        what = f"scene {step['scene']}"
+    elif "event" in step:
+        what = f"fire event {step['event']}"
+    elif "choose" in step:
+        what = "another choose"
+    elif "if" in step:
+        what = "another if"
+    elif "sequence" in step or "parallel" in step:
+        what = describe_actions(step.get("sequence") or step.get("parallel")) or "a group of actions"
+    else:
+        what = next(iter(step), "an action")
+    return what + (f" (+{more} more)" if more else "")
 
 
 def automation_conditions(entity: Any) -> list[dict]:
@@ -312,7 +345,7 @@ def condition_entities(hass: HomeAssistant, confs: Iterable[dict]) -> dict[str, 
                 if item["kind"] == "cond":
                     stack.append(item["conf"])
                 for option in item.get("options") or []:
-                    stack.extend(option)
+                    stack.extend(option["conds"])
             continue
         o = _opts(conf)
         for eid in as_list(o.get("entity_id")):
@@ -355,6 +388,22 @@ def none_of(results: Iterable[str]) -> str:
     if PASS in results:
         return FAIL
     return PASS if all(r == FAIL for r in results) else UNKNOWN
+
+
+def _would_run(options: list[dict], item: dict) -> dict | None:
+    """In a choose only the first matching option runs: that one, plus any earlier ones that can't be told."""
+    maybe = []
+    for opt in options:
+        if opt["result"] == FAIL:
+            continue
+        brief = {k: opt.get(k) for k in ("option", "alias", "does", "result")}
+        if opt["result"] == PASS:
+            return {"label": item["label"], "options": [*maybe, brief], "certain": not maybe}
+        maybe.append(brief)
+    if maybe or item["default"]:
+        default = [{"default": True, "does": item.get("default_does"), "result": PASS}] if item["default"] else []
+        return {"label": item["label"], "options": maybe + default, "certain": not maybe}
+    return None
 
 
 def _gate(entries: list[tuple[str, list[dict], bool]], result_of) -> str:
@@ -627,6 +676,7 @@ class ConditionEvaluator:
         """Would any action have run? `fail`: every gate (choose/if/condition step) fails."""
         entries: list[tuple[str, list[dict], bool]] = []
         shown: list[dict] = []
+        runs: dict | None = None  # which option would have run (the first branch that decides anything)
         for item in o.get("items") or []:
             kind = item["kind"]
             if kind == "cond":
@@ -635,12 +685,22 @@ class ConditionEvaluator:
                 shown.append(step)
             elif kind == "branch":
                 options = []
-                for n, confs in enumerate(item["options"], 1):
-                    kids = [self._eval(c, when) for c in confs if _enabled(c)]
-                    label = "if" if item["label"] == "if" else f"choose option {n}"
-                    options.append({"condition": label, "result": all_of(k["result"] for k in kids), "conditions": kids})
+                for n, option in enumerate(item["options"], 1):
+                    kids = [self._eval(c, when) for c in option["conds"] if _enabled(c)]
+                    options.append({
+                        "condition": "if" if item["label"] == "if" else f"choose option {n}",
+                        "result": all_of(k["result"] for k in kids),
+                        "conditions": kids,
+                        "option": n,
+                        "alias": option.get("alias"),
+                        "does": option.get("does"),
+                        # options that only run for another trigger id say nothing about this one
+                        "other_trigger": any(k["condition"] == "trigger" and k["result"] == FAIL for k in kids),
+                    })
                 entries.append(("branch", options, item["default"]))
                 shown.extend(options)
+                if runs is None:
+                    runs = _would_run(options, item)
             else:
                 entries.append((kind, [], False))
         result = _gate(entries, lambda s: s["result"])
@@ -655,6 +715,7 @@ class ConditionEvaluator:
             "exact_result": _gate(entries, _without_estimates),
             "why": why,
             "conditions": shown,
+            "runs": runs,
         }
 
     def _c_trigger(self, o: dict, when: datetime | None) -> dict:

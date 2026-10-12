@@ -66,6 +66,14 @@ Other details:
 - Disabled triggers (`enabled: false`) and disabled conditions are skipped.
 - Automations that were **off** before the downtime (or, for what-if, are off now) are skipped. They're counted in the report, not listed.
 
+**`for:` triggers** (state and numeric state) fire only if the new value holds for that long, and Home Assistant doesn't resume that wait after a restart. So Downtime Auditor watches the entity after startup, for up to 10 minutes after the analysis:
+
+- If it **changed again too soon** for the value to have held (for example a clock sensor watched for going stale, which ticks again within minutes), or the value only changed *after* startup (Home Assistant saw that itself), the finding is dropped.
+- If it **still has the value once `for:` has passed**, the trigger would have fired: Confirmed.
+- Otherwise it stays Probable, and the finding says why (*Held long enough?*).
+
+A change from `unknown`/`unavailable` (an integration reporting late) doesn't count as the value changing.
+
 Entities that haven't reported yet after the restart (their integration is still connecting, so they're `unknown` or `unavailable`) aren't reported as missed: that says nothing about the trigger. Their triggers are **re-checked when the entity reports**, for up to 10 minutes. If the value came back unchanged, or Home Assistant fired the automation itself when it did, nothing is added. If it changed in a way Home Assistant won't act on (for example a `from: "off"` trigger, which doesn't fire on `unknown → on`), a finding is added to the report, with a Repairs issue and a follow-up push if it's severe enough. Entities that never report are listed once as *couldn't check*. While re-checks are pending, the report and dashboard say which entities they're waiting for.
 
 If Downtime Auditor itself can't analyze a trigger (a bug, or a Home Assistant change it doesn't handle yet), that trigger is listed once under *Couldn't analyze*, never as a missed trigger or a Repairs issue, and Home Assistant's log gets a warning with the details. Please report these.
@@ -132,6 +140,8 @@ Repairs, push and `binary_sensor.downtime_auditor_needs_attention` only consider
 For Missed findings with Confirmed or Probable confidence, the automation's `conditions` are evaluated at each missed time. If any missed time passes, the result is *pass*; if all fail, *fail*; otherwise *unknown*.
 
 The **actions** are checked too, when they start with a gate: a `choose` without `default`, an `if` without `else`, or a condition step. If every gate fails (for example, the only `choose` option needs a different time of day), nothing would have run and the finding is None, shown as *actions: nothing would have run*. Gates use the same condition checks, including `trigger` ids.
+
+On the dashboard, a finding's **Conditions** lead with the answer and the check that decided it. For actions they name the `choose` option that would have run, the first one that matches, by its `alias:` or by what it does, for example *“Resync pool clock” (option 8) → script.opnpool_resync*. Give your `choose` options an alias to make this easy to read. Every check is under *Show all checks*, where options that only run for other trigger ids fold to one line.
 
 | Condition | After a real outage | What-if (past window) |
 |---|---|---|

@@ -598,10 +598,19 @@ class DowntimeAuditorPanel extends HTMLElement {
   // "2 of 3 · event doorbell_pressed (id “bell”)": which trigger, in words (older reports: platform and #).
   _triggerLabel(c) {
     const d = c.details || {};
-    if (c.type !== "missed" || (c.trigger_index == null && c.trigger_id == null && !d.trigger)) return "";
-    const pos = d.trigger_of > 1 && c.trigger_index != null ? `${c.trigger_index + 1} of ${d.trigger_of} · ` : "";
+    if (c.type !== "missed" || (c.trigger_index == null && c.trigger_id == null && !d.trigger)) return null;
     const what = d.trigger || [c.platform, c.trigger_index != null ? `#${c.trigger_index}` : ""].filter(Boolean).join(" ");
-    return `${pos}${what}${c.trigger_id ? ` (id “${c.trigger_id}”)` : ""}`;
+    const where = [
+      c.trigger_index != null && d.trigger_of > 1 ? `trigger ${c.trigger_index + 1} of ${d.trigger_of}` : "",
+      c.trigger_id ? `id “${c.trigger_id}”` : "",
+    ].filter(Boolean).join(" · ");
+    return { what, where };
+  }
+
+  _triggerLabelHtml(c, cls = "") {
+    const t = this._triggerLabel(c);
+    if (!t) return "";
+    return `<div${cls ? ` class="${cls}"` : ""}>${esc(t.what)}</div>${t.where ? `<div class="muted small">${esc(t.where)}</div>` : ""}`;
   }
 
   // One trigger of a multi-trigger finding: its own severity, confidence and evidence.
@@ -614,7 +623,7 @@ class DowntimeAuditorPanel extends HTMLElement {
         ${c.confidence && CONF[c.confidence] ? `<span class="conf-inline">${this._meter(c.confidence)} ${esc(CONF[c.confidence].label)}</span>` : ""}
         ${c.platform ? `<span class="tag">${esc(c.platform)}</span>` : ""}${trig ? `<span class="tag">${trig}</span>` : ""}
       </div>
-      ${this._triggerLabel(c) ? `<div class="trig-what">${esc(this._triggerLabel(c))}</div>` : ""}
+      ${this._triggerLabelHtml(c, "trig-what")}
       <div class="trig-sum">${esc(c.summary)}</div>
       ${canRate ? this._triggerPicker(c) : ""}
       ${this._details(c, { nested: true })}
@@ -636,8 +645,8 @@ class DowntimeAuditorPanel extends HTMLElement {
           <div class="v">${this._severityPicker(f)} <span class="muted small-inline">Saved as a <code>downtime_auditor_sev</code> label.</span></div></div>`);
       }
       const only = children.length === 1 ? children[0] : children.length ? null : f;
-      const trigLabel = only ? this._triggerLabel(only) : "";
-      if (trigLabel) parts.push(`<div class="kv"><div class="k">Trigger</div><div class="v">${esc(trigLabel)}</div></div>`);
+      const trigLabel = only ? this._triggerLabelHtml(only) : "";
+      if (trigLabel) parts.push(`<div class="kv"><div class="k">Trigger</div><div class="v">${trigLabel}</div></div>`);
       const trigPicker = canRate && only ? this._triggerPicker(only, { label: false }) : "";
       if (trigPicker) {
         parts.push(`<div class="kv"><div class="k">Rate this trigger</div>
@@ -660,13 +669,19 @@ class DowntimeAuditorPanel extends HTMLElement {
         <div class="v chips">${f.occurrences.map((o) => `<span class="mini">${esc(o)}</span>`).join("")}</div></div>`);
     }
     if ("before" in d || "after" in d) {
-      parts.push(`<div class="kv"><div class="k">Value</div><div class="v ba">
-        <span class="mini">${esc(JSON.stringify(d.before))}</span><span class="arrow">→</span><span class="mini">${esc(JSON.stringify(d.after))}</span>
-        ${d.attribute ? `<span class="muted">attribute ${esc(d.attribute)}</span>` : ""}</div></div>`);
+      const who = d.entity ? `${d.entity}${d.attribute ? ` [${d.attribute}]` : ""}` : "Value";
+      parts.push(`<div class="kv"><div class="k">${esc(who)}</div><div class="v ba">
+        <span class="mini">${esc(JSON.stringify(d.before))}</span> <span class="muted">before the downtime</span>
+        <span class="arrow">→</span><span class="mini">${esc(JSON.stringify(d.after))}</span> <span class="muted">after startup</span></div></div>`);
     }
     if (d.next_due) parts.push(`<div class="kv"><div class="k">Runs again</div><div class="v">${esc(fmtTime(d.next_due))}${d.next_due_minutes != null ? ` <span class="muted">(${d.next_due_minutes < 1 ? "under a minute" : `${esc(Math.round(d.next_due_minutes))} min`} after Home Assistant started)</span>` : ""}</div></div>`);
-    if (d.for != null) parts.push(`<div class="kv"><div class="k">for:</div><div class="v">${esc(fmtDur(d.for))}</div></div>`);
-    if (d.above != null || d.below != null) parts.push(`<div class="kv"><div class="k">Range</div><div class="v">${d.above != null ? `&gt; ${esc(d.above)}` : ""} ${d.below != null ? `&lt; ${esc(d.below)}` : ""}</div></div>`);
+    const hold = d.hold_check;
+    if (hold && hold.result !== "pending") {
+      parts.push(`<div class="kv"><div class="k">Held long enough?</div><div class="v">${esc(hold.why)}</div></div>`);
+    } else if (d.for != null && !d.trigger) {
+      parts.push(`<div class="kv"><div class="k">for:</div><div class="v">${esc(fmtDur(d.for))}</div></div>`);
+    }
+    if ((d.above != null || d.below != null) && !d.trigger) parts.push(`<div class="kv"><div class="k">Range</div><div class="v">${d.above != null ? `&gt; ${esc(d.above)}` : ""} ${d.below != null ? `&lt; ${esc(d.below)}` : ""}</div></div>`);
     if (d.template) parts.push(`<div class="kv"><div class="k">Template</div><div class="v"><code>${esc(d.template)}</code></div></div>`);
     if (d.reason) parts.push(`<div class="kv"><div class="k">Why</div><div class="v">${esc(d.reason)}</div></div>`);
     if (d.events?.length) parts.push(`<div class="kv"><div class="k">Events</div><div class="v">${d.events.map(esc).join(", ")}</div></div>`);
@@ -693,17 +708,53 @@ class DowntimeAuditorPanel extends HTMLElement {
 
   _conditions(c) {
     const ICON = { pass: "mdi:check-circle-outline", fail: "mdi:close-circle-outline", unknown: "mdi:help-circle-outline" };
+    const BASIS = { baseline: "pre-downtime value", unchanged: "same before and after the downtime", history: "history" };
     const basis = { baseline: "pre-downtime values", history: "recorder history", none: "no recorded states" }[c.basis] || c.basis;
-    const step = (s) => `<li class="cs ${esc(s.result)}"><ha-icon icon="${ICON[s.result] || ICON.unknown}"></ha-icon>
-      <b>${esc(s.condition)}</b>${s.why ? ` — ${esc(s.why)}` : ""}${s.basis ? ` <span class="muted">(${esc({ baseline: "pre-downtime value", unchanged: "same before and after the downtime", history: "history" }[s.basis] || s.basis)})</span>` : ""}
+    const steps = c.steps || [];
+    const actions = steps.find((s) => s.condition === "actions");
+    const own = steps.filter((s) => s !== actions);
+    const all = (list) => list.some((s) => s.result === "fail") ? "fail" : list.every((s) => s.result === "pass") ? "pass" : "unknown";
+    const leaf = (list, result) => { // the first plain check with this result, as "kind — why"
+      for (const s of list || []) {
+        if (s.result !== result || s.other_trigger) continue;
+        if (s.conditions?.length && s.condition !== "not") { const inner = leaf(s.conditions, result); if (inner) return inner; continue; }
+        return `${s.condition}${s.why ? ` — ${s.why}` : ""}`;
+      }
+      return "";
+    };
+    const optName = (o) => o.default ? "the default actions" : o.alias ? `“${o.alias}” (option ${o.option})` : `option ${o.option}`;
+    const optText = (o) => `${optName(o)}${o.does ? ` → ${o.does}` : ""}${o.result === "unknown" ? " (can't be checked)" : ""}`;
+    const lines = [];
+    if (own.length) {
+      const r = all(own);
+      lines.push(`<b>Conditions:</b> ${r === "pass" ? "pass" : r === "fail" ? `fail — ${esc(leaf(own, "fail"))}` : `can't be checked — ${esc(leaf(own, "unknown"))}`}`);
+    } else lines.push(`<b>Conditions:</b> none`);
+    if (actions) {
+      const runs = actions.runs;
+      const label = runs?.label === "if" ? "if" : "choose";
+      if (actions.result === "pass" && runs) lines.push(`<b>Actions:</b> ${label === "if" ? "the if would run" : "would run"} ${esc(runs.options.map(optText).join(" or "))}`);
+      else if (actions.result === "pass") lines.push(`<b>Actions:</b> would run`);
+      else if (actions.result === "fail") {
+        const mine = (actions.conditions || []).filter((s) => !s.other_trigger);
+        lines.push(`<b>Actions:</b> nothing would run — ${esc(mine.length ? leaf(mine, "fail") || "every option fails" : "no option is for this trigger")}`);
+      } else lines.push(`<b>Actions:</b> can't tell — ${esc(runs ? runs.options.map(optText).join(" or ") : leaf(actions.conditions, "unknown"))}`);
+    }
+    const step = (s) => s.other_trigger
+      ? `<li class="cs other"><ha-icon icon="mdi:minus-circle-outline"></ha-icon><b>${esc(s.alias ? `“${s.alias}” (${s.condition})` : s.condition)}</b> — for another trigger</li>`
+      : `<li class="cs ${esc(s.result)}"><ha-icon icon="${ICON[s.result] || ICON.unknown}"></ha-icon>
+      <b>${esc(s.alias ? `“${s.alias}” (${s.condition})` : s.condition)}</b>${s.why ? ` — ${esc(s.why)}` : ""}${s.does ? ` <span class="muted">→ ${esc(s.does)}</span>` : ""}${s.basis ? ` <span class="muted">(${esc(BASIS[s.basis] || s.basis)})</span>` : ""}
       ${s.conditions?.length ? `<ul>${s.conditions.map(step).join("")}</ul>` : ""}</li>`;
+    const head = c.likely === "fail" ? "unknown" : c.result;
     const headline = c.likely === "fail"
-      ? "Probably failed — based on pre-downtime values, which may have changed while HA was down"
-      : { pass: "Would have passed", fail: "Would have failed", unknown: "Couldn't be checked" }[c.result] || c.result;
+      ? "Probably wouldn't have run — based on pre-downtime values, which may have changed while HA was down"
+      : { pass: "Would have run", fail: "Wouldn't have run", unknown: "Can't tell whether it would have run" }[c.result] || c.result;
+    const others = (actions?.conditions || []).filter((s) => s.other_trigger).length;
     return `<div class="kv"><div class="k">Conditions</div><div class="v">
-      <div class="cond-head ${esc(c.likely === "fail" ? "unknown" : c.result)}">${esc(headline)}</div>
-      <div class="muted">${c.checked > 1 ? `Checked at ${esc(c.checked)} due times; breakdown for ${esc(fmtTime(c.shown_for))}. ` : ""}From ${esc(basis)}.</div>
-      <ul class="cond-tree">${(c.steps || []).map(step).join("")}</ul></div></div>`;
+      <div class="cond-head ${esc(head)}"><ha-icon icon="${ICON[head] || ICON.unknown}"></ha-icon> ${esc(headline)}</div>
+      <div class="cond-lines">${lines.map((l) => `<div>${l}</div>`).join("")}</div>
+      <details class="cond-all"><summary>Show all checks${others ? ` (${others} ${others === 1 ? "option is" : "options are"} for other triggers)` : ""}</summary>
+        <div class="muted">${c.checked > 1 ? `Checked at ${esc(c.checked)} due times; breakdown for ${esc(fmtTime(c.shown_for))}. ` : ""}From ${esc(basis)}.</div>
+        <ul class="cond-tree">${steps.map(step).join("")}</ul></details></div></div>`;
   }
 
   _historyView() {
@@ -1034,6 +1085,11 @@ svg text.count { font-size: 10px; }
 .trig { border: 1px solid var(--da-line); border-radius: 8px; padding: 8px 10px; }
 .trig-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .trig-what { margin-top: 4px; font-weight: 500; overflow-wrap: anywhere; }
+.small { font-size: 12px; }
+.cond-head ha-icon { --mdc-icon-size: 18px; }
+.cond-lines { margin: 4px 0; display: grid; gap: 2px; overflow-wrap: anywhere; }
+.cond-all summary { cursor: pointer; color: var(--secondary-text-color); margin-top: 4px; }
+.cs.other { opacity: .6; }
 .rules-card h4 { margin: 16px 0 6px; }
 .rule-start { margin: 0; padding-left: 22px; }
 .rule-list { list-style: none; margin: 0; padding: 0; }

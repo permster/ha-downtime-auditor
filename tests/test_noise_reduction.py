@@ -234,3 +234,34 @@ async def test_real_outage_end_to_end(hass, enable_custom_integrations):
     assert garage["details"]["conditions"]["steps"][0]["basis"] == "unchanged"
     assert (cpap["conditions"], cpap["severity"]) == ("fail", "none")
     assert "actions: nothing would have run" in cpap["severity_reason"]
+
+
+# ---------------------------------------------------------------- which choose option would run
+
+
+async def test_choose_names_the_option_that_runs(hass):
+    """Only the first matching option runs; options are named by alias or by what they'd do."""
+    sync = {"condition": "trigger", "id": "sync"}
+    actions = [{"choose": [
+        {"conditions": [{"condition": "trigger", "id": "other"}], "sequence": [NOTIFY]},
+        {"conditions": [sync, LATE], "sequence": [{"action": "light.turn_on", "target": {"entity_id": "light.porch"}}]},
+        {"alias": "Resync pool clock", "conditions": [sync], "sequence": [{"action": "script.opnpool_resync"}, NOTIFY]},
+        {"conditions": [sync], "sequence": [NOTIFY]},  # also matches, but option 3 runs first
+    ]}]
+    res = _gate_result(hass, actions, trigger_id="sync")
+    (step,) = [s for s in res["steps"] if s["condition"] == "actions"]
+    assert step["runs"] == {"label": "choose", "certain": True, "options": [
+        {"option": 3, "alias": "Resync pool clock", "does": "script.opnpool_resync (+1 more)", "result": PASS}]}
+    by = {s["option"]: s for s in step["conditions"]}
+    assert by[1]["other_trigger"] and not by[2]["other_trigger"]
+    assert by[2]["does"] == "light.turn_on light.porch"
+
+
+async def test_choose_with_an_option_that_cant_be_checked(hass):
+    unknown = {"condition": "state", "entity_id": "input_boolean.nobody", "state": "on"}
+    actions = [{"choose": [{"conditions": [unknown], "sequence": [NOTIFY]},
+                           {"conditions": [{"condition": "trigger", "id": "sync"}], "sequence": [NOTIFY]}],
+                "default": [{"delay": 1}]}]
+    (step,) = [s for s in _gate_result(hass, actions, trigger_id="sync")["steps"] if s["condition"] == "actions"]
+    assert step["runs"]["certain"] is False
+    assert [o.get("option") for o in step["runs"]["options"]] == [1, 2]

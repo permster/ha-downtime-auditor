@@ -14,6 +14,7 @@ from homeassistant.helpers import entity_registry as er, label_registry as lr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     async_call_later,
+    async_track_point_in_utc_time,
     async_track_state_change_event,
     async_track_time_interval,
 )
@@ -21,6 +22,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from . import holds
 from .analyzer import Analyzer, Finding, Window, _parse_dt, interrupted_findings
 from .const import (
     CONF_HEARTBEAT_INTERVAL,
@@ -91,12 +93,15 @@ from .report import (
     refresh_summary,
     upgrade_legacy,
 )
+from .schedule import fmt_period
 from .severity import at_least, effective_severity
 from .snapshot import (
+    as_list,
     automation_entities,
     capture_baseline,
     capture_running,
     trigger_configs,
+    trigger_platform,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -149,6 +154,10 @@ class DowntimeAuditor:
         self.version: str | None = None  # integration version (set by async_setup_entry)
         self._rerate_unsub = None
         self._rechecks: dict[str, Any] | None = None
+        self._holds: dict[str, Any] | None = None  # `for:` findings waiting for their deadline
+        # (old, new) states since HA started, for entities in `for:` triggers (until the analysis)
+        self._post_start: dict[str, list] = {}
+        self._post_start_unsub: Any = None
         self._frozen = False  # set once the shutdown snapshot is written
 
     # ------------------------------------------------------------------ options
@@ -221,6 +230,8 @@ class DowntimeAuditor:
             self._rerate_unsub()
             self._rerate_unsub = None
         self._stop_rechecks()
+        self._stop_holds()
+        self._stop_post_start()
         if self.active:
             # Mark as clean so a later reload doesn't look like a crash.
             self._refresh(clean=True)
@@ -302,12 +313,41 @@ class DowntimeAuditor:
     @callback
     def _on_started(self, hass: HomeAssistant) -> None:
         self.started_at = dt_util.utcnow()
+        self._record_post_start_changes()
         delay = max(0, int(self.opt(CONF_STARTUP_DELAY)))
         _LOGGER.debug("HA started; analyzing in %ss", delay)
         self._analysis_due = self.started_at + timedelta(seconds=delay)
         self._analysis_unsub = async_call_later(
             self.hass, delay, HassJob(self._async_run_startup_analysis, cancel_on_shutdown=True)
         )
+
+    @callback
+    def _record_post_start_changes(self) -> None:
+        """Until the analysis: how entities in `for:` triggers change after startup."""
+        entities: set[str] = set()
+        for ent in automation_entities(self.hass):
+            for conf in trigger_configs(ent):
+                if trigger_platform(conf) in ("state", "numeric_state") and conf.get("for") is not None:
+                    entities.update(e for e in as_list(conf.get("entity_id")) if isinstance(e, str))
+        self._post_start = {}
+        if not entities:
+            return
+
+        @callback
+        def _changed(event: Event) -> None:
+            if event.time_fired < self.started_at:  # queued from before startup
+                return
+            changes = self._post_start.setdefault(event.data["entity_id"], [])
+            if len(changes) < 50:
+                changes.append((event.data.get("old_state"), event.data.get("new_state")))
+
+        self._post_start_unsub = async_track_state_change_event(self.hass, sorted(entities), _changed)
+
+    @callback
+    def _stop_post_start(self) -> None:
+        if self._post_start_unsub:
+            self._post_start_unsub()
+            self._post_start_unsub = None
 
     def pending(self) -> dict | None:
         """While a restart is being analyzed: what we're waiting for (for the dashboard)."""
@@ -380,6 +420,7 @@ class DowntimeAuditor:
         # must not overwrite the snapshot of what was interrupted.
         self._frozen = True
         self._stop_rechecks()
+        self._stop_holds()
         await self.store.async_save(self.data)
         _LOGGER.debug(
             "Shutdown snapshot saved (%s runs in progress)",
@@ -424,6 +465,8 @@ class DowntimeAuditor:
         findings += analyzer.analyze(self.startup_triggered)
         findings += await analyzer.async_analyze_calendars()
         findings += self._startup_fired_findings()
+        findings, watch = self._apply_holds(findings, window)
+        self._stop_post_start()  # the watch below takes over
         self._check_conditions(findings, self._baseline_source())
         self._rate(findings)
 
@@ -449,6 +492,7 @@ class DowntimeAuditor:
             report["recheck_until"] = (dt_util.utcnow() + timedelta(seconds=RECHECK_TIMEOUT)).isoformat()
         await self._async_publish(report)
         self._start_rechecks(analyzer, report)
+        self._start_holds(watch, report)
         return report
 
     @staticmethod
@@ -567,6 +611,149 @@ class DowntimeAuditor:
             await self.store.async_save(self.data)
         async_dispatcher_send(self.hass, SIGNAL_REPORT_UPDATED)
 
+    # ------------------------------------------------------------------ `for:` holds
+
+    def _apply_holds(self, findings: list[Finding], window: Window) -> tuple[list[Finding], list[dict]]:
+        """Decide `for:` findings from what their entity did after startup.
+
+        Drops the ones that changed again too soon to have fired, confirms the ones that
+        held long enough, and returns the rest to watch until their deadline.
+        """
+        kept, watch = [], []
+        now = dt_util.utcnow()
+        for f in findings:
+            d = f.details or {}
+            if (d.get("hold_check") or {}).get("result") != "pending":
+                kept.append(f)
+                continue
+            item = {
+                "automation": f.entity_id, "trigger_index": f.trigger_index, "entity": d.get("entity"),
+                "attribute": d.get("attribute"), "after": d.get("after"), "before": d.get("before"),
+                "hold": float(d["for"]),
+                "start": window.start, "end": window.end,
+            }
+            result, moment = holds.verdict(
+                self.hass.states.get(item["entity"]), item["attribute"], item["after"], item["hold"],
+                window.start, window.end, now, self._post_start.get(item["entity"]) or [], item["before"],
+            )
+            if result == holds.RULED_OUT:
+                _LOGGER.debug("%s: %s changed again at %s, too soon for `for:`", f.entity_id, item["entity"], moment)
+                continue
+            d["hold_check"] = self._hold_note(item, result, moment)
+            if result == holds.HELD:
+                f.confidence = Confidence.CONFIRMED
+            elif result == holds.WATCH:
+                item["deadline"] = moment
+                watch.append(item)
+            kept.append(f)
+        return kept, watch
+
+    @staticmethod
+    def _hold_note(item: dict, result: str, moment: datetime | None) -> dict:
+        """What the dashboard and Repairs say about the `for:` check."""
+        at = dt_util.as_local(moment).strftime("%H:%M:%S") if moment else "?"
+        value, period = item["after"], fmt_period(item["hold"])
+        why = {
+            holds.HELD: f"it was still '{value}' at {at}, {period} after the change, so it would have fired",
+            holds.CHANGED: f"it changed again at {at}; whether '{value}' held for {period} before that can't be told",
+            holds.WATCH: f"watching: if it's still '{value}' at {at}, it would have fired",
+            "timeout": f"still '{value}' when the check stopped; it needed to hold until {at}",
+        }[result]
+        return {"result": result, "at": moment.isoformat() if moment else None, "why": why}
+
+    @callback
+    def _start_holds(self, items: list[dict], report: dict, keep: bool = False) -> None:
+        """Watch `for:` findings until their deadline (at most RECHECK_TIMEOUT)."""
+        if not keep:
+            self._stop_holds()
+        if not items:
+            return
+        if self._holds is None:
+            self._holds = {"report_id": report["generated_at"], "items": [], "unsubs": []}
+        h = self._holds
+        limit = dt_util.utcnow() + timedelta(seconds=RECHECK_TIMEOUT)
+        for item in items:
+            h["items"].append(item)
+            h["unsubs"].append(
+                async_track_state_change_event(self.hass, [item["entity"]], self._on_hold_entity)
+            )
+
+            async def _due(_now: datetime, item: dict = item) -> None:
+                await self._async_hold_result(item, None)
+
+            h["unsubs"].append(async_track_point_in_utc_time(
+                self.hass, HassJob(_due, cancel_on_shutdown=True), min(item["deadline"], limit)
+            ))
+
+    @callback
+    def _stop_holds(self) -> None:
+        if not self._holds:
+            return
+        for unsub in self._holds["unsubs"]:
+            unsub()
+        self._holds = None
+
+    @callback
+    def _on_hold_entity(self, event: Event) -> None:
+        if not self._holds:
+            return
+        change = (event.data.get("old_state"), event.data.get("new_state"))
+        for item in [i for i in self._holds["items"] if i["entity"] == event.data["entity_id"]]:
+            if event.time_fired <= item["end"]:  # from before startup: already part of the analysis
+                continue
+            if holds.first_real_change([change], item["attribute"]) is not None:
+                self.hass.async_create_task(self._async_hold_result(item, change[1]))
+
+    async def _async_hold_result(self, item: dict, new_state: Any) -> None:
+        """The entity changed (new_state) or the deadline came (None): update the finding."""
+        h, rep = self._holds, self.last_report
+        if not h or item not in h["items"]:
+            return
+        h["items"].remove(item)
+        if not rep or rep.get("generated_at") != h["report_id"]:
+            self._stop_holds()
+            return
+        now = dt_util.utcnow()
+        if new_state is not None:
+            moment = holds.changed_at(new_state, item["attribute"])
+            result = holds.decide(moment, item["hold"], item["start"])
+        elif now >= item["deadline"]:
+            result, moment = holds.HELD, item["deadline"]
+        else:
+            result, moment = "timeout", item["deadline"]
+        group, child = self._find_trigger(rep, item)
+        if child is None:
+            return
+        if result == holds.RULED_OUT:
+            group["triggers"].remove(child)
+            if not group["triggers"]:
+                rep["findings"].remove(group)
+        else:
+            child["details"]["hold_check"] = self._hold_note(item, result, moment)
+            if result == holds.HELD:
+                child["confidence"] = Confidence.CONFIRMED.value
+                base, source = self._base_severity(SeverityLookup(self.hass), child)
+                sev, reason = self._severity(base, source, child["type"], child["confidence"], child["details"])
+                child.update(severity=sev.value, severity_source=source, severity_base=base.value, severity_reason=reason)
+        _LOGGER.debug("`for:` check for %s: %s", item["automation"], result)
+        if not h["items"]:
+            self._stop_holds()
+        await self._async_report_changed(rep, [])
+
+    @staticmethod
+    def _find_trigger(rep: dict, item: dict) -> tuple[dict | None, dict | None]:
+        for group in rep.get("findings") or []:
+            for child in group.get("triggers") or [group]:
+                if (
+                    child.get("entity_id") == item["automation"]
+                    and child.get("trigger_index") == item["trigger_index"]
+                    and (child.get("details") or {}).get("entity") == item["entity"]
+                ):
+                    if not group.get("triggers"):
+                        group["triggers"] = [child]
+                    return group, child
+        return None, None
+
     # ------------------------------------------------------------------ late re-checks
 
     @callback
@@ -650,9 +837,12 @@ class DowntimeAuditor:
             if (p["automation"], p["trigger_index"], p["entity"]) not in keys
         ]
         if new:
+            window = rc["analyzer"].window
+            new, watch = self._apply_holds(new, window)
             self._check_conditions(new, self._baseline_source())
             self._rate(new)
             rep["findings"].extend(f.as_dict() for f in new)
+            self._start_holds(watch, rep, keep=True)
         _LOGGER.debug("%s reported: %s trigger(s) resolved, %s finding(s) added", entity_id, len(resolved), len(new))
         if not rc["pending"]:
             self._stop_rechecks()

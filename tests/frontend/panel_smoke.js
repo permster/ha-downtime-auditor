@@ -96,8 +96,24 @@ const tick = () => new Promise((r) => setImmediate(r));
   STATE.open.push(key);
   p._render();
   html = p.shadowRoot.innerHTML;
-  assert(html.includes("Probably failed — based on pre-downtime values"), "condition headline");
-  assert(html.includes('class="cond-tree"') && html.includes("<b>or</b>"), "condition breakdown tree");
+  assert(html.includes("Probably wouldn") && html.includes("based on pre-downtime values"), "condition headline");
+  assert(html.includes("<b>Conditions:</b> fail — state — input_boolean.vac"), "the deciding check, up front");
+  assert(html.includes('class="cond-all"') && html.includes('class="cond-tree"') && html.includes("<b>or</b>"), "all checks, folded");
+
+  // A choose whose options are named by alias / what they'd do; options for other triggers fold away.
+  const opt = (n, result, extra = {}) => ({ condition: `choose option ${n}`, result, option: n, conditions: [], ...extra });
+  const gate = p._conditions({ result: "pass", basis: "baseline", checked: 1, steps: [{
+    condition: "actions", result: "pass", why: "would have run",
+    conditions: [opt(1, "fail", { other_trigger: true }), opt(2, "unknown", { does: "light.turn_on light.porch" }),
+                 opt(3, "pass", { alias: "Resync pool clock", does: "script.opnpool_resync" })],
+    runs: { label: "choose", certain: false, options: [
+      { option: 2, does: "light.turn_on light.porch", result: "unknown" },
+      { option: 3, alias: "Resync pool clock", does: "script.opnpool_resync", result: "pass" }] } }] });
+  assert(gate.includes("<b>Conditions:</b> none"), "no automation conditions");
+  assert(gate.includes("would run option 2 → light.turn_on light.porch (can&#39;t be checked) or “Resync pool clock” (option 3) → script.opnpool_resync")
+    || gate.includes("would run option 2 → light.turn_on light.porch (can't be checked) or “Resync pool clock” (option 3) → script.opnpool_resync"),
+    "which option would run, by name: " + gate.match(/<b>Actions:<\/b>[^<]*/)?.[0]);
+  assert(gate.includes("(1 option is for other triggers)") && gate.includes("— for another trigger"), "other triggers' options fold away");
   assert(html.includes('data-rate="automation.morning"') && html.includes("Unrated (starts at Medium)"), "severity picker");
   assert(/href="\/config\/automation\/edit\/a" data-nav/.test(html), "real Edit link");
   assert(/href="\/config\/automation\/trace\/a" data-nav/.test(html), "real Traces link");
@@ -107,7 +123,7 @@ const tick = () => new Promise((r) => setImmediate(r));
   html = p.shadowRoot.innerHTML;
   assert(/<option value="high" selected>High<\/option>/.test(html), "picker shows the label rating");
   assert(html.includes('<div class="k">Rate this trigger</div>'), "single-trigger findings can rate their trigger too");
-  assert(html.includes('<div class="k">Trigger</div><div class="v">every 30 minutes</div>'), "which trigger, in words");
+  assert(html.includes('<div class="k">Trigger</div><div class="v"><div>Time pattern: every 30 minutes</div></div>'), "which trigger, in words");
   assert.strictEqual((html.match(/data-rate-trigger=/g) || []).length, 2, "one trigger selector each for Morning and Pattern");
 
   // ---- a multi-trigger automation is one row, with its triggers listed when expanded
@@ -119,7 +135,8 @@ const tick = () => new Promise((r) => setImmediate(r));
   p._render();
   html = p.shadowRoot.innerHTML;
   assert(html.includes('<div class="k">Triggers (2)</div>'), "trigger list in the details");
-  assert(html.includes('<div class="trig-what">1 of 2 · event x</div>') && html.includes('<div class="trig-what">2 of 2 · event y</div>'),
+  assert(html.includes('<div class="trig-what">Event: x</div><div class="muted small">trigger 1 of 2</div>')
+    && html.includes('<div class="trig-what">Event: y</div><div class="muted small">trigger 2 of 2</div>'),
     "each listed trigger says which one it is");
   assert.strictEqual((html.match(/class="trig"/g) || []).length, 2, "both triggers listed");
   assert(html.includes("Medium (unrated) → Low: can&#39;t be confirmed, so capped at Low ·")

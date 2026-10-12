@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.util import dt as dt_util
 
 from . import schedule
+from .holds import for_seconds
 from .const import (
     DEFAULT_SEVERITY,
     SEVERITY_SOURCE_DEFAULT,
@@ -555,7 +556,10 @@ class Analyzer:
         elif has_for:
             confd = Confidence.PROBABLE
             why = "matches, but the `for:` duration can't be verified across the downtime"
-            details["for"] = jsonable(conf.get("for"))
+            secs = for_seconds(conf.get("for"))
+            details["for"] = secs if secs is not None else jsonable(conf.get("for"))
+            if secs is not None:  # decided from what the entity does after startup (DowntimeAuditor)
+                details["hold_check"] = {"result": "pending"}
         elif changed_after:
             confd = Confidence.PROBABLE
             why = (
