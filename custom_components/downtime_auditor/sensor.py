@@ -32,6 +32,7 @@ TYPE_SENSORS = [
     (FindingType.INTERRUPTED, "Interrupted automations", "mdi:motion-pause-outline"),
     (FindingType.MISSED, "Missed triggers", "mdi:calendar-remove-outline"),
     (FindingType.FIRED_AT_STARTUP, "Fired at startup", "mdi:rocket-launch-outline"),
+    (FindingType.REVERTED, "Reverted states", "mdi:restore-alert"),
 ]
 
 

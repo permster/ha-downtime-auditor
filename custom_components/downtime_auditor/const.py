@@ -34,6 +34,8 @@ CONF_SHOW_SEVERITY_NONE = "show_severity_none"
 CONF_UNCONFIRMABLE_SEVERITY = "unconfirmable_severity"
 # A missed time_pattern tick is None when the pattern runs again within this many minutes of startup (0 = off)
 CONF_TIME_PATTERN_CATCH_UP = "time_pattern_catch_up_minutes"
+# Which restored entities are checked for reverted states after an unclean stop: used | all | off
+CONF_REVERTED_SCOPE = "reverted_scope"
 
 # Options removed in config entry version 2 (dropped by async_migrate_entry).
 LEGACY_OPTIONS = ("repairs_possible", "include_unverifiable", "retention")
@@ -56,6 +58,7 @@ DEFAULT_PUSH_MIN_SEVERITY = "high"
 DEFAULT_SHOW_SEVERITY_NONE = False
 DEFAULT_UNCONFIRMABLE_SEVERITY = "low"
 DEFAULT_TIME_PATTERN_CATCH_UP = 60  # minutes
+DEFAULT_REVERTED_SCOPE = "used"
 
 SIGNAL_REPORT_UPDATED = f"{DOMAIN}_report_updated"
 PANEL_URL = "downtime-auditor"
@@ -74,6 +77,7 @@ class FindingType(StrEnum):
     INTERRUPTED = "interrupted"
     MISSED = "missed"
     FIRED_AT_STARTUP = "fired_at_startup"
+    REVERTED = "reverted"  # a restored state came back older after an unclean stop
 
 
 class Confidence(StrEnum):
@@ -99,6 +103,7 @@ TYPE_LABELS = {
     FindingType.INTERRUPTED: "Interrupted",
     FindingType.MISSED: "Missed",
     FindingType.FIRED_AT_STARTUP: "Fired at startup",
+    FindingType.REVERTED: "Reverted",
 }
 CONFIDENCE_LABELS = {
     Confidence.CONFIRMED: "Confirmed",

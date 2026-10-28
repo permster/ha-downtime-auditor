@@ -91,6 +91,9 @@ cmd_reset() { cmd_stop; log "deleting $DA_SANDBOX"; rm -rf "$DA_SANDBOX"; }
 outage() {
   local hours="$1" mode="${2:-clean}" since
   since="$(ctl report-id)"   # wait for a report newer than the current one
+  if [ "${3:-}" = revert ]; then  # a change seconds before the crash: HA's saved copy is older, so it reverts
+    ctl call input_boolean.turn_on '{"entity_id": "input_boolean.vacation_mode"}'; sleep 3
+  fi
   if [ "$mode" = unclean ]; then cmd_stop --unclean; ctl backdate "$hours" --unclean
   else cmd_stop; ctl backdate "$hours"; fi
   [ "${3:-}" = changes ] && ctl offline-changes
@@ -113,8 +116,8 @@ cmd_demo() {
   ctl rate
   log "outage 1: a quick clean restart"
   outage 0.05
-  log "outage 2: a crash, 25 minutes"
-  outage 0.4 unclean
+  log "outage 2: a crash, 25 minutes (vacation mode switched on just before: it comes back off)"
+  outage 0.4 unclean revert
   log "outage 3: a clean 2-hour outage with runs in progress and changes while down"
   ctl prepare
   outage 2 clean changes

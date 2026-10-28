@@ -97,7 +97,7 @@ def _v04_report(clean=True):
 
 def test_upgrade_legacy_history_line():
     line = upgrade_legacy(copy.deepcopy(V04_HISTORY))
-    assert line["counts"] == {"interrupted": 1, "missed": 9, "fired_at_startup": 5}
+    assert line["counts"] == {"interrupted": 1, "missed": 9, "fired_at_startup": 5, "reverted": 0}
     assert line["skipped"] == 6
     assert line["actionable"] == 6  # kept with its old meaning
     assert line["needs_attention"] is None
@@ -122,7 +122,7 @@ def test_upgrade_legacy_report_file(clean, first_confidence):
     assert by["automation.c"]["severity"] == by["automation.d"]["severity"] == "low"  # capped
     assert all(f["severity_base"] == "medium" for f in rep["findings"])
     assert all(f["severity_reason"] == "Recorded before severity ratings existed" for f in rep["findings"])
-    assert rep["counts"] == {"interrupted": 0, "missed": 3, "fired_at_startup": 1}
+    assert rep["counts"] == {"interrupted": 0, "missed": 3, "fired_at_startup": 1, "reverted": 0}
     assert rep["counts_by_severity"]["medium"] == 2 and rep["counts_by_severity"]["low"] == 2
     assert rep["highest_severity"] == "medium"
     assert rep["needs_attention"] is None and rep["actionable"] == 2
@@ -158,7 +158,7 @@ async def test_history_tab_reads_v04_files(hass, enable_custom_integrations, has
     msg = await client.receive_json()
     assert msg["success"]
     (item,) = msg["result"]
-    assert item["counts"] == {"interrupted": 1, "missed": 9, "fired_at_startup": 5}
+    assert item["counts"] == {"interrupted": 1, "missed": 9, "fired_at_startup": 5, "reverted": 0}
     assert item["legacy"] is True and item["available"] is True
 
     await client.send_json({"id": 2, "type": "downtime_auditor/report", "file": item["file"]})
@@ -429,4 +429,4 @@ async def test_upgrade_from_v04_end_to_end(hass, enable_custom_integrations, has
     await client.send_json({"id": 1, "type": "downtime_auditor/history"})
     items = (await client.receive_json())["result"]
     assert [i.get("legacy", False) for i in items] == [False, True]
-    assert all(set(i["counts"]) == {"interrupted", "missed", "fired_at_startup"} for i in items)
+    assert all(set(i["counts"]) == {"interrupted", "missed", "fired_at_startup", "reverted"} for i in items)

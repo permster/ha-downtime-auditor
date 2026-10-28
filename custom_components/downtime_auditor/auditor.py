@@ -22,7 +22,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from . import holds
+from . import holds, reverts
 from .analyzer import Analyzer, Finding, Window, _parse_dt, interrupted_findings
 from .const import (
     CONF_HEARTBEAT_INTERVAL,
@@ -37,6 +37,7 @@ from .const import (
     CONF_SHOW_SEVERITY_NONE,
     CONF_UNCONFIRMABLE_SEVERITY,
     CONF_TIME_PATTERN_CATCH_UP,
+    CONF_REVERTED_SCOPE,
     CONF_HISTORY_DAYS,
     CONF_REPORT_DAYS,
     CONF_SIDEBAR_PANEL,
@@ -55,6 +56,7 @@ from .const import (
     DEFAULT_SHOW_SEVERITY_NONE,
     DEFAULT_UNCONFIRMABLE_SEVERITY,
     DEFAULT_TIME_PATTERN_CATCH_UP,
+    DEFAULT_REVERTED_SCOPE,
     DEFAULT_HISTORY_DAYS,
     DEFAULT_REPORT_DAYS,
     DEFAULT_SIDEBAR_PANEL,
@@ -78,11 +80,13 @@ from .const import (
 from .conditions import (
     BaselineSource,
     StateSource,
+    action_gate,
     async_history_source,
     automation_conditions,
     condition_entities,
     evaluate_finding,
 )
+from .effects import extract_effects, remaining_effects, uses_trigger_ids
 from .labels import SeverityLookup
 from .repairs import async_sync_issues
 from .report import (
@@ -106,6 +110,12 @@ from .snapshot import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _clock(iso: str | None) -> str | None:
+    """'07:00:00' (local) from an ISO time."""
+    moment = _parse_dt(iso)
+    return dt_util.as_local(moment).strftime("%H:%M:%S") if moment else None
+
 DEFAULTS = {
     CONF_HEARTBEAT_INTERVAL: DEFAULT_HEARTBEAT_INTERVAL,
     CONF_STARTUP_DELAY: DEFAULT_STARTUP_DELAY,
@@ -124,6 +134,7 @@ DEFAULTS = {
     CONF_SHOW_SEVERITY_NONE: DEFAULT_SHOW_SEVERITY_NONE,
     CONF_UNCONFIRMABLE_SEVERITY: DEFAULT_UNCONFIRMABLE_SEVERITY,
     CONF_TIME_PATTERN_CATCH_UP: DEFAULT_TIME_PATTERN_CATCH_UP,
+    CONF_REVERTED_SCOPE: DEFAULT_REVERTED_SCOPE,
 }
 
 SCHEDULE_PLATFORMS = {"time", "time_pattern", "sun", "calendar"}
@@ -133,6 +144,9 @@ SCHEDULE_PLATFORMS = {"time", "time_pattern", "sun", "calendar"}
 # RECHECK_TIMEOUT s; whatever is still unknown then is listed as unchecked.
 RECHECK_SETTLE = 5
 RECHECK_TIMEOUT = 600
+
+# A change to a restored entity is saved this many seconds later (HA's own copy: every 15 min).
+RESTORED_SAVE_DELAY = 1
 
 
 class DowntimeAuditor:
@@ -159,6 +173,10 @@ class DowntimeAuditor:
         self._post_start: dict[str, list] = {}
         self._post_start_unsub: Any = None
         self._frozen = False  # set once the shutdown snapshot is written
+        self._restored_ids: set[str] = set()  # restored entities whose values we keep (reverted states)
+        # Values at startup of the previous session's restored entities, and HA's saved copies of them
+        self._restored_at_start: dict[str, dict] = {}
+        self._saved_copies: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ options
 
@@ -185,6 +203,7 @@ class DowntimeAuditor:
             "last_report": self.last_report,
             "repair_issues": list(self.prev.get("repair_issues") or []),
             "trigger_ratings": dict(self.prev.get("trigger_ratings") or {}),
+            "restored": {},  # entity id → {"state", "changed"}: values of restored entities
         }
 
         # Shutdown jobs run *before* integrations (and running scripts) are stopped.
@@ -196,6 +215,11 @@ class DowntimeAuditor:
         self._unsubs.append(
             self.hass.bus.async_listen(
                 EVENT_STATE_CHANGED, self._on_state_changed, event_filter=self._state_filter
+            )
+        )
+        self._unsubs.append(
+            self.hass.bus.async_listen(
+                EVENT_STATE_CHANGED, self._on_restored_changed, event_filter=self._restored_filter
             )
         )
         # Ratings changed outside the dashboard (HA's label editor) re-rate the current report.
@@ -245,8 +269,15 @@ class DowntimeAuditor:
         return (
             event_data.get("action") == "update"
             and "labels" in (event_data.get("changes") or {})
-            and (eid.startswith("automation.") or eid.startswith("script."))
+            and (eid.startswith("automation.") or eid.startswith("script.") or eid in self._reverted_ids())
         )
+
+    def _reverted_ids(self) -> set[str]:
+        """Entities with a reverted finding in the last report (rated by their own label)."""
+        return {
+            f.get("entity_id") for f in (self.last_report or {}).get("findings") or []
+            if f.get("type") == FindingType.REVERTED
+        }
 
     @callback
     def _on_ratings_changed(self, _event: Event) -> None:
@@ -274,6 +305,23 @@ class DowntimeAuditor:
         new_cur = new.attributes.get("current") if new else None
         if old_cur != new_cur:
             self._schedule_running_save()
+
+    @callback
+    def _restored_filter(self, event_data: Any) -> bool:
+        return event_data.get("entity_id") in self._restored_ids
+
+    @callback
+    def _on_restored_changed(self, event: Event) -> None:
+        """Keep a restored entity's new value, saved within seconds (a crash loses HA's newer changes)."""
+        if not self.active or self._frozen:
+            return
+        new = event.data.get("new_state")
+        values = self.data.setdefault("restored", {})
+        if new is None or new.state in UNKNOWN_STATES:
+            values.pop(event.data["entity_id"], None)
+        else:
+            values[event.data["entity_id"]] = {"state": new.state, "changed": new.last_changed.isoformat()}
+        self.store.async_delay_save(self._data_with_running, RESTORED_SAVE_DELAY)
 
     @callback
     def _on_run_started(self, event: Event) -> None:
@@ -314,12 +362,20 @@ class DowntimeAuditor:
     def _on_started(self, hass: HomeAssistant) -> None:
         self.started_at = dt_util.utcnow()
         self._record_post_start_changes()
+        self._capture_restored_at_start()
         delay = max(0, int(self.opt(CONF_STARTUP_DELAY)))
         _LOGGER.debug("HA started; analyzing in %ss", delay)
         self._analysis_due = self.started_at + timedelta(seconds=delay)
         self._analysis_unsub = async_call_later(
             self.hass, delay, HassJob(self._async_run_startup_analysis, cancel_on_shutdown=True)
         )
+
+    @callback
+    def _capture_restored_at_start(self) -> None:
+        """What restored entities came back with, before automations get to change them."""
+        before = list(self.prev.get("restored") or {})
+        self._restored_at_start = reverts.capture(self.hass, before)
+        self._saved_copies = reverts.saved_copies(self.hass, before)
 
     @callback
     def _record_post_start_changes(self) -> None:
@@ -395,6 +451,11 @@ class DowntimeAuditor:
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Baseline capture failed")
         try:
+            self._restored_ids = reverts.tracked(self.hass, self.opt(CONF_REVERTED_SCOPE))
+            self.data["restored"] = reverts.capture(self.hass, self._restored_ids)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Restored-state capture failed")
+        try:
             self.data["running"] = {
                 "captured_at": now,
                 "runs": capture_running(self.hass, self.opt(CONF_INCLUDE_SCRIPTS)),
@@ -465,9 +526,12 @@ class DowntimeAuditor:
         findings += analyzer.analyze(self.startup_triggered)
         findings += await analyzer.async_analyze_calendars()
         findings += self._startup_fired_findings()
+        if not clean:
+            findings += self._reverted_findings()
         findings, watch = self._apply_holds(findings, window)
         self._stop_post_start()  # the watch below takes over
         self._check_conditions(findings, self._baseline_source())
+        self._add_effects(findings)
         self._rate(findings)
 
         n_auto, n_trig = self._counts()
@@ -552,6 +616,7 @@ class DowntimeAuditor:
             self.opt(CONF_UNCONFIRMABLE_SEVERITY),
             caught_up_in=(details or {}).get("next_due_minutes"),
             catch_up_limit=int(self.opt(CONF_TIME_PATTERN_CATCH_UP) or 0),
+            already_back=bool((details or {}).get("already_back")),
         )
         if cond.get("result") == "fail" and cond.get("why"):
             reason = f"{reason}: {cond['why']}"
@@ -561,6 +626,52 @@ class DowntimeAuditor:
 
     # Conditions are checked only where the trigger very likely did fire.
     CONDITION_CONFIDENCE = (Confidence.CONFIRMED, Confidence.PROBABLE)
+
+    def _action_sequence(self, entity_id: str) -> tuple[Any, Any]:
+        """(entity, its validated action sequence) for an automation or script; (None, None) if gone."""
+        domain = entity_id.split(".", 1)[0]
+        component = self.hass.data.get(domain)
+        ent = component.get_entity(entity_id) if component is not None and hasattr(component, "get_entity") else None
+        if ent is None:
+            return None, None
+        script = getattr(ent, "action_script", None) or getattr(ent, "script", None)
+        seq = getattr(script, "sequence", None)
+        if seq is None:
+            raw = getattr(ent, "raw_config", None) or {}
+            seq = raw.get("actions") or raw.get("action") or raw.get("sequence")
+        return ent, seq
+
+    def _add_effects(self, findings: list[Finding]) -> None:
+        """What the actions that didn't run would have changed (the dashboard shows their live state)."""
+        for f in findings:
+            try:
+                ent, seq = self._action_sequence(f.entity_id)
+                if seq is None:
+                    continue
+                if f.type == FindingType.MISSED:
+                    steps = ((f.details or {}).get("conditions") or {}).get("steps") or []
+                    gate = next((s for s in steps if s.get("condition") == "actions"), None)
+                    if gate is not None:
+                        runs = gate.get("runs")
+                        if not runs:
+                            continue
+                        items = [e for o in runs["options"] for e in o.get("effects") or []]
+                        certain = bool(runs.get("certain"))
+                    elif action_gate(ent) is None:
+                        items, certain = extract_effects(seq), True
+                    else:
+                        continue  # gated, but the gate wasn't evaluated: which actions would run is unknown
+                elif f.type == FindingType.INTERRUPTED:
+                    items = []
+                    for run in (f.details or {}).get("runs") or []:
+                        items += [e for e in remaining_effects(seq, run.get("last_step")) if e not in items]
+                    certain = True
+                else:
+                    continue
+                if items:
+                    f.details["effects"] = {"items": items, "certain": certain, "by_trigger": uses_trigger_ids(seq)}
+            except Exception:  # noqa: BLE001  (extra detail must never break the analysis)
+                _LOGGER.debug("Could not work out the effects of %s", f.entity_id, exc_info=True)
 
     def _baseline_source(self) -> BaselineSource:
         """Pre-downtime values; values that are the same after startup count as unchanged."""
@@ -840,6 +951,7 @@ class DowntimeAuditor:
             window = rc["analyzer"].window
             new, watch = self._apply_holds(new, window)
             self._check_conditions(new, self._baseline_source())
+            self._add_effects(new)
             self._rate(new)
             rep["findings"].extend(f.as_dict() for f in new)
             self._start_holds(watch, rep, keep=True)
@@ -901,6 +1013,41 @@ class DowntimeAuditor:
             )
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Failed to send the follow-up push via %s", service)
+
+    def _reverted_findings(self) -> list[Finding]:
+        """Restored entities that came back with an older value after the unclean stop."""
+        out = []
+        used = reverts.users(self.hass)
+        for item in reverts.compare(self.prev.get("restored") or {}, self._restored_at_start, self._saved_copies):
+            eid, before, after = item["entity_id"], item["before"], item["after"]
+            st = self.hass.states.get(eid)
+            set_at, saved = _clock(item["changed"]), _clock(item["saved_at"])
+            summary = f"Was '{before}'" + (f" (set at {set_at})" if set_at else "") + f", came back '{after}'"
+            summary += f" from Home Assistant's copy saved at {saved}" if saved else " after the restart"
+            users = []
+            for user in used.get(eid, []):
+                ust = self.hass.states.get(user)
+                users.append({"entity_id": user, "name": (ust.attributes.get("friendly_name") if ust else None) or user})
+            out.append(Finding(
+                type=FindingType.REVERTED,
+                # It came back with HA's older saved copy: the newer value was lost for certain.
+                confidence=Confidence.CONFIRMED if item["saved_at"] else Confidence.PROBABLE,
+                entity_id=eid,
+                name=(st.attributes.get("friendly_name") if st else None) or eid,
+                summary=summary,
+                details={
+                    "before": before,
+                    "after": after,
+                    "changed": item["changed"],
+                    "saved_at": item["saved_at"],
+                    "used_by": users,
+                    "already_back": st is not None and st.state == before,
+                    "effects": {"items": [{"entity_id": eid, "action": f"was {before}", "expected": before}],
+                                "certain": True, "by_trigger": False},
+                    "set_back": reverts.set_back(eid, before),
+                },
+            ))
+        return out
 
     def _startup_fired_findings(self) -> list[Finding]:
         out = []
@@ -1009,7 +1156,7 @@ class DowntimeAuditor:
                 "automations_skipped": len(analyzer.skipped),
                 "triggers_checked": n_trig,
                 "analysis_errors": analyzer.errors,
-                "note": "Simulation: only time, time_pattern, sun and calendar triggers are evaluated; "
+                "note": "Simulation: only time, time-pattern, sun and calendar triggers are evaluated; "
                 "conditions are checked against recorder history.",
                 "conditions_basis": source.basis,
             },

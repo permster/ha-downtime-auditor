@@ -144,7 +144,7 @@ async def test_full_restart_cycle(hass, enable_custom_integrations):
     assert path and Path(path).exists()
     saved_report = json.loads(Path(path).read_text())
     assert saved_report["schema"] == 3 and saved_report["counts"]["missed"] >= 6
-    assert set(saved_report["counts"]) == {"interrupted", "missed", "fired_at_startup"}
+    assert set(saved_report["counts"]) == {"interrupted", "missed", "fired_at_startup", "reverted"}
     history = (Path(path).parent.parent / "history.jsonl").read_text().splitlines()
     line = json.loads(history[-1])
     assert line["schema"] == 3 and line["highest_severity"] == "medium"

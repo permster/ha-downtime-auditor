@@ -6,6 +6,7 @@ const TYPES = [
   { key: "interrupted", label: "Interrupted", icon: "mdi:motion-pause-outline" },
   { key: "missed", label: "Missed", icon: "mdi:calendar-remove-outline" },
   { key: "fired_at_startup", label: "Fired at startup", icon: "mdi:rocket-launch-outline" },
+  { key: "reverted", label: "Reverted", icon: "mdi:restore-alert" },
 ];
 const TYPE = Object.fromEntries(TYPES.map((t) => [t.key, t]));
 const SEVERITIES = [
@@ -63,6 +64,7 @@ const STORE_KEY = "downtime_auditor_panel_v1";
 const DEFAULT_STATE = () => ({
   tab: "report",
   types: TYPES.map((t) => t.key),
+  knownTypes: TYPES.map((t) => t.key),
   minSeverity: "all",
   confidences: CONFIDENCES.map((c) => c.key),
   showNone: null, // null = follow the integration option
@@ -76,7 +78,12 @@ const DEFAULT_STATE = () => ({
 function loadState() {
   let saved = null;
   try { saved = JSON.parse(window.sessionStorage.getItem(STORE_KEY) || "null"); } catch (e) { /* private mode etc. */ }
-  return { ...DEFAULT_STATE(), ...(saved && typeof saved === "object" ? saved : {}) };
+  const state = { ...DEFAULT_STATE(), ...(saved && typeof saved === "object" ? saved : {}) };
+  // A finding type added since the filter was saved starts shown.
+  const known = Array.isArray(saved?.knownTypes) ? saved.knownTypes : ["interrupted", "missed", "fired_at_startup"];
+  for (const t of TYPES) if (!known.includes(t.key) && !state.types.includes(t.key)) state.types.push(t.key);
+  state.knownTypes = TYPES.map((t) => t.key);
+  return state;
 }
 const STATE = loadState();
 let LOADED_VERSION = null; // integration version this page's panel.js came from
@@ -106,8 +113,24 @@ class DowntimeAuditorPanel extends HTMLElement {
     const mb = this.shadowRoot.querySelector("ha-menu-button");
     if (mb) mb.hass = hass;
     if (STATE.tab === "live") this._watchRuns(hass);
+    else if (this._effectIds?.size) this._watchEffects(hass);
   }
   get hass() { return this._hass; }
+
+  _effectSignature(hass) {
+    let sig = "";
+    for (const id of this._effectIds || []) sig += `${id}=${hass?.states?.[id]?.state};`;
+    return sig;
+  }
+
+  // "What it would have changed" shows live states: redraw when one of them changes.
+  _watchEffects(hass) {
+    const sig = this._effectSignature(hass);
+    if (sig === this._effectSig) return;
+    this._effectSig = sig;
+    clearTimeout(this._effectTimer);
+    this._effectTimer = setTimeout(() => this._render(), 300);
+  }
   set narrow(v) {
     this._narrow = v;
     const mb = this.shadowRoot.querySelector("ha-menu-button");
@@ -241,6 +264,7 @@ class DowntimeAuditorPanel extends HTMLElement {
   _render() {
     const r = this.shadowRoot;
     const scrollY = r.querySelector(".content")?.scrollTop || 0;
+    this._effectIds = new Set(); // filled while rendering "Would have changed"
     r.innerHTML = `<style>${STYLE}</style>
       <div class="toolbar">
         <ha-menu-button></ha-menu-button>
@@ -258,6 +282,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     if (mb) { mb.hass = this._hass; mb.narrow = this._narrow; }
     const content = r.querySelector(".content");
     if (content) content.scrollTop = scrollY;
+    this._effectSig = this._effectSignature(this._hass);
     this._bind();
     saveState();
   }
@@ -458,7 +483,8 @@ class DowntimeAuditorPanel extends HTMLElement {
     const lanes = { interrupted: 24, missed: 46, fired_at_startup: 66 };
     const marks = [];
     // Each trigger of a finding gets its own marks (and its own severity color).
-    const marked = findings.flatMap((g) => (g.triggers?.length ? g.triggers.map((c) => ({ ...c, name: g.name })) : [g]));
+    const marked = findings.filter((g) => g.type !== "reverted")
+      .flatMap((g) => (g.triggers?.length ? g.triggers.map((c) => ({ ...c, name: g.name })) : [g]));
     for (const f of marked) {
       const color = SEV[f.severity]?.color || "var(--da-sev-none)";
       const y = lanes[f.type] ?? 46;
@@ -549,18 +575,124 @@ class DowntimeAuditorPanel extends HTMLElement {
           <ha-icon icon="${open ? "mdi:chevron-up" : "mdi:chevron-down"}"></ha-icon>
         </div>
       </button>
-      ${open ? `<div class="row-body">${this._details(f, { canRate: canRate && !live })}<div class="links">${this._editorLinks(f).join("")}</div></div>` : ""}
+      ${open ? `<div class="row-body">${this._details(f, { canRate: canRate && !live })}${canRate && !live ? this._runSection(f, key) : ""}<div class="links">${this._editorLinks(f).join("")}</div></div>` : ""}
     </div>`;
   }
 
   _severityPicker(f) {
-    const rateable = /^(automation|script)\./.test(String(f.entity_id || ""));
+    const rateable = f.type === "reverted" || /^(automation|script)\./.test(String(f.entity_id || ""));
     if (!rateable) return "";
     const current = f.severity_source === "label" ? (f.severity_base || f.severity) : "";
     return `<select class="sev-select" data-rate="${esc(f.entity_id)}" aria-label="Severity rating for ${esc(f.name)}">
       <option value="" ${current ? "" : "selected"}>Unrated (starts at Medium)</option>
       ${SEVERITIES.map((s) => `<option value="${s.key}" ${current === s.key ? "selected" : ""}>${s.label}</option>`).join("")}
     </select>`;
+  }
+
+  // The entities the actions that didn't run would have changed, with their live state.
+  _effects(f, e) {
+    const rows = e.items.map((x) => {
+      this._effectIds?.add(x.entity_id);
+      const st = this._hass?.states?.[x.entity_id];
+      const name = st?.attributes?.friendly_name;
+      const now = st ? st.state : "not found";
+      let mark = "";
+      if (st && x.expected != null) {
+        mark = String(st.state) === String(x.expected)
+          ? `<span class="eff ok">✓ as expected</span>`
+          : `<span class="eff warn">⚠ expected ${esc(x.expected)}</span>`;
+      }
+      return `<div class="eff-row"><span class="mono">${esc(x.entity_id)}</span>${name ? ` <span class="muted">${esc(name)}</span>` : ""}
+        <span class="muted">${esc(x.action)}</span> → now <b>${esc(now)}</b> ${mark}</div>`;
+    });
+    const label = { interrupted: "Didn't get to change", reverted: "Now" }[f.type] || "Would have changed";
+    return `<div class="kv"><div class="k">${label}</div><div class="v">${rows.join("")}
+      <div class="muted small">Current states, live.${e.certain ? "" : " Which option would have run isn't certain."}</div></div></div>`;
+  }
+
+  // A reverted state: when the lost change was made, Home Assistant's older copy, who uses it.
+  _revertedRows(d) {
+    const rows = [];
+    const lost = [d.changed ? `set to ${JSON.stringify(d.before)} at ${fmtTime(d.changed)}` : "",
+      d.saved_at ? `Home Assistant's saved copy was from ${fmtTime(d.saved_at)}` : ""].filter(Boolean);
+    if (lost.length) rows.push(`<div class="kv"><div class="k">Lost change</div><div class="v">${esc(lost.join("; "))}.
+      <div class="muted small">Home Assistant saves restored states every 15 minutes and when it stops cleanly; a crash or power loss loses anything newer.</div></div></div>`);
+    if (d.used_by?.length) {
+      rows.push(`<div class="kv"><div class="k">Used by</div><div class="v">${d.used_by.map((u) =>
+        `<a href="#" data-more="${esc(u.entity_id)}">${esc(u.name || u.entity_id)}</a>`).join(", ")}
+        <div class="muted small">These may have acted on the old value since the restart.</div></div></div>`);
+    }
+    return rows.join("");
+  }
+
+  // "Set back to …" for a reverted state, with a confirmation.
+  _setBackSection(f, key) {
+    const d = f.details || {};
+    const fix = d.set_back;
+    if (!fix) {
+      return `<div class="run-fix muted small">There's no action to set ${esc(f.entity_id.split(".")[0])} entities from here: check its source.</div>`;
+    }
+    if (this._confirmRun !== key) {
+      return `<div class="run-fix"><button class="btn secondary" data-run="${esc(key)}">Set back to ${esc(d.before)}</button>
+        <span class="muted small-inline">Calls <code>${esc(fix.action)}</code>.</span></div>`;
+    }
+    return `<div class="run-confirm" role="alertdialog">
+      <b>Set ${esc(f.name)} back to ${esc(d.before)}?</b>
+      <p>This calls <code>${esc(fix.action)}</code> now. Automations triggered by this change will run.
+        Check the value is still what you want: it was ${esc(d.before)} before the stop, and things may have changed since.</p>
+      <button class="btn" data-fix-go="${esc(JSON.stringify(fix))}">Set back</button>
+      <button class="btn secondary" data-run-cancel>Cancel</button>
+    </div>`;
+  }
+
+  async _setBack(fix) {
+    this._confirmRun = null;
+    const [domain, service] = fix.action.split(".");
+    try {
+      await this._hass.callService(domain, service, fix.data);
+      this._notice = `Called ${fix.action} for ${fix.data.entity_id}. Check it has the value you expected.`;
+      this._error = null;
+    } catch (e) {
+      this._error = e.message || String(e);
+    }
+    this._render();
+  }
+
+  // "Run actions now", with a confirmation that says what it can't do.
+  _runSection(f, key) {
+    if (STATE.tab !== "report" || STATE.viewingFile) return "";
+    if (f.type === "reverted") return this._setBackSection(f, key);
+    const isScript = String(f.entity_id).startsWith("script.");
+    if (!isScript && !String(f.entity_id).startsWith("automation.")) return "";
+    const byTrigger = [f, ...(f.triggers || [])].some((c) => c.details?.effects?.by_trigger);
+    if (this._confirmRun !== key) {
+      return `<div class="run-fix"><button class="btn secondary" data-run="${esc(key)}">Run actions now</button>
+        <span class="muted small-inline">Runs the ${isScript ? "script" : "automation's actions"} once, now.</span></div>`;
+    }
+    return `<div class="run-confirm" role="alertdialog">
+      <b>Run ${esc(f.name)} now?</b>
+      <p>${isScript ? "This starts the script again from the beginning" : "This runs its actions now, skipping its conditions"}.
+        It isn't the same as what was missed: there's no trigger data, and the time and states are different now,
+        so it may not do what you expect. Check the results afterwards.</p>
+      ${byTrigger ? `<p class="warn">⚠ Its actions depend on which trigger fired (trigger ids). Run by hand, they probably won't take the same path.
+        Setting the entities above yourself may be safer.</p>` : ""}
+      <button class="btn" data-run-go="${esc(f.entity_id)}">Run now</button>
+      <button class="btn secondary" data-run-cancel>Cancel</button>
+    </div>`;
+  }
+
+  async _runNow(entityId) {
+    this._confirmRun = null;
+    const [domain] = entityId.split(".");
+    try {
+      if (domain === "script") await this._hass.callService("script", "turn_on", { entity_id: entityId });
+      else await this._hass.callService("automation", "trigger", { entity_id: entityId, skip_condition: true });
+      this._notice = `Started ${entityId}. Check that it did what you expected.`;
+      this._error = null;
+    } catch (e) {
+      this._error = e.message || String(e);
+    }
+    this._render();
   }
 
   // "Medium (unrated) → None: the pattern runs again …" when a rule changed the starting rating.
@@ -641,7 +773,8 @@ class DowntimeAuditorPanel extends HTMLElement {
         <span class="sev-badge" style="--s:${SEV[f.severity]?.color}">${esc(SEV[f.severity]?.label || f.severity)}</span>
         <span class="muted">${esc(this._severityWhy(f))} · <a href="#" data-tab="rules">How is this decided?</a></span></div></div>`);
       if (canRate && this._severityPicker(f)) {
-        parts.push(`<div class="kv"><div class="k">Rate this ${String(f.entity_id).startsWith("script.") ? "script" : "automation"}</div>
+        const what = f.type === "reverted" ? "entity" : String(f.entity_id).startsWith("script.") ? "script" : "automation";
+        parts.push(`<div class="kv"><div class="k">Rate this ${what}</div>
           <div class="v">${this._severityPicker(f)} <span class="muted small-inline">Saved as a <code>downtime_auditor_sev</code> label.</span></div></div>`);
       }
       const only = children.length === 1 ? children[0] : children.length ? null : f;
@@ -674,6 +807,8 @@ class DowntimeAuditorPanel extends HTMLElement {
         <span class="mini">${esc(JSON.stringify(d.before))}</span> <span class="muted">before the downtime</span>
         <span class="arrow">→</span><span class="mini">${esc(JSON.stringify(d.after))}</span> <span class="muted">after startup</span></div></div>`);
     }
+    if (f.type === "reverted") parts.push(this._revertedRows(d));
+    if (d.effects?.items?.length) parts.push(this._effects(f, d.effects));
     if (d.next_due) parts.push(`<div class="kv"><div class="k">Runs again</div><div class="v">${esc(fmtTime(d.next_due))}${d.next_due_minutes != null ? ` <span class="muted">(${d.next_due_minutes < 1 ? "under a minute" : `${esc(Math.round(d.next_due_minutes))} min`} after Home Assistant started)</span>` : ""}</div></div>`);
     const hold = d.hold_check;
     if (hold && hold.result !== "pending") {
@@ -768,11 +903,11 @@ class DowntimeAuditorPanel extends HTMLElement {
     const bars = items.map((it, i) => {
       const v = it.window?.duration_seconds || 0;
       const bh = Math.max(2, (Math.sqrt(v) / Math.sqrt(max)) * (H - 40));
-      const act = (it.counts?.interrupted || 0) + (it.counts?.missed || 0);
+      const act = (it.counts?.interrupted || 0) + (it.counts?.missed || 0) + (it.counts?.reverted || 0);
       const fill = it.window?.clean_shutdown ? "var(--da-bar-clean)" : "var(--da-bar-unclean)";
       const top = it.highest_severity && it.highest_severity !== "none" ? SEV[it.highest_severity] : null;
       return `<g class="bar-g" data-file="${esc(it.available ? it.file : "")}">
-        <title>${esc(fmtTime(it.window?.start))}: ${esc(it.window?.duration)} · ${act} missed/interrupted${top ? ` · highest ${top.label}` : ""}</title>
+        <title>${esc(fmtTime(it.window?.start))}: ${esc(it.window?.duration)} · ${act} missed/interrupted/reverted${top ? ` · highest ${top.label}` : ""}</title>
         <rect x="${20 + i * bw + bw * 0.15}" y="${H - 20 - bh}" width="${bw * 0.7}" height="${bh}" rx="3" fill="${fill}"/>
         ${top ? `<circle cx="${20 + i * bw + bw / 2}" cy="${H - 26 - bh}" r="4" fill="${top.color}"/>` : ""}
       </g>`;
@@ -896,6 +1031,10 @@ class DowntimeAuditorPanel extends HTMLElement {
     on("input[data-act=show-none]", "change", (el) => { STATE.showNone = el.checked; this._render(); });
     on("select[data-rate]", "change", (el) => this._rate(el.dataset.rate, el.value || null));
     on("select[data-rate-trigger]", "change", (el) => this._rateTrigger(JSON.parse(el.dataset.rateTrigger), el.value || null));
+    on("button[data-run]", "click", (el) => { this._confirmRun = el.dataset.run; this._render(); });
+    on("button[data-run-cancel]", "click", () => { this._confirmRun = null; this._render(); });
+    on("button[data-run-go]", "click", (el) => this._runNow(el.dataset.runGo));
+    on("button[data-fix-go]", "click", (el) => this._setBack(JSON.parse(el.dataset.fixGo)));
     const search = r.querySelector(".search");
     if (search) search.addEventListener("input", (ev) => {
       STATE.search = ev.target.value;
@@ -1086,6 +1225,14 @@ svg text.count { font-size: 10px; }
 .trig-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .trig-what { margin-top: 4px; font-weight: 500; overflow-wrap: anywhere; }
 .small { font-size: 12px; }
+.eff-row { overflow-wrap: anywhere; }
+.eff { font-weight: 500; }
+.eff.ok { color: var(--success-color, #43a047); }
+.eff.warn { color: var(--warning-color, #ffa600); }
+.run-fix { margin: 8px 0; }
+.run-confirm { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--warning-color, #ffa600); border-radius: 8px; }
+.run-confirm p { margin: 6px 0; }
+.run-confirm .warn { color: var(--warning-color, #ffa600); }
 .cond-head ha-icon { --mdc-icon-size: 18px; }
 .cond-lines { margin: 4px 0; display: grid; gap: 2px; overflow-wrap: anywhere; }
 .cond-all summary { cursor: pointer; color: var(--secondary-text-color); margin-top: 4px; }

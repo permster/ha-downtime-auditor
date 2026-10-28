@@ -27,6 +27,7 @@ from homeassistant.helpers.template import Template, result_as_boolean
 from homeassistant.util import dt as dt_util
 
 from .const import UNKNOWN_STATES
+from .effects import extract_effects
 from .schedule import WEEKDAYS, in_numeric_range
 from .snapshot import as_list
 
@@ -211,18 +212,22 @@ def _gate_items(seq: Any) -> list[dict]:
             items.append({"kind": "cond", "conf": step})
         elif "choose" in step:
             options = [
-                {"conds": _gate_conds(o.get("conditions")), "alias": o.get("alias"), "does": describe_actions(o.get("sequence"))}
+                {"conds": _gate_conds(o.get("conditions")), "alias": o.get("alias"), "does": describe_actions(o.get("sequence")),
+                 "effects": extract_effects(o.get("sequence"))}
                 for o in as_list(step["choose"])
                 if isinstance(o, dict) and _enabled(o)
             ]
             items.append({"kind": "branch", "label": "choose", "options": options,
                           "default": bool(as_list(step.get("default"))),
-                          "default_does": describe_actions(step.get("default"))})
+                          "default_does": describe_actions(step.get("default")),
+                          "default_effects": extract_effects(step.get("default"))})
         elif "if" in step:
-            option = {"conds": _gate_conds(step["if"]), "alias": step.get("alias"), "does": describe_actions(step.get("then"))}
+            option = {"conds": _gate_conds(step["if"]), "alias": step.get("alias"), "does": describe_actions(step.get("then")),
+                      "effects": extract_effects(step.get("then"))}
             items.append({"kind": "branch", "label": "if", "options": [option],
                           "default": bool(as_list(step.get("else"))),
-                          "default_does": describe_actions(step.get("else"))})
+                          "default_does": describe_actions(step.get("else")),
+                          "default_effects": extract_effects(step.get("else"))})
         elif "variables" in step:
             continue
         elif "stop" in step:
@@ -396,12 +401,13 @@ def _would_run(options: list[dict], item: dict) -> dict | None:
     for opt in options:
         if opt["result"] == FAIL:
             continue
-        brief = {k: opt.get(k) for k in ("option", "alias", "does", "result")}
+        brief = {k: opt.get(k) for k in ("option", "alias", "does", "result", "effects")}
         if opt["result"] == PASS:
             return {"label": item["label"], "options": [*maybe, brief], "certain": not maybe}
         maybe.append(brief)
     if maybe or item["default"]:
-        default = [{"default": True, "does": item.get("default_does"), "result": PASS}] if item["default"] else []
+        default = [{"default": True, "does": item.get("default_does"), "result": PASS,
+                    "effects": item.get("default_effects") or []}] if item["default"] else []
         return {"label": item["label"], "options": maybe + default, "certain": not maybe}
     return None
 
@@ -694,6 +700,7 @@ class ConditionEvaluator:
                         "option": n,
                         "alias": option.get("alias"),
                         "does": option.get("does"),
+                        "effects": option.get("effects") or [],
                         # options that only run for another trigger id say nothing about this one
                         "other_trigger": any(k["condition"] == "trigger" and k["result"] == FAIL for k in kids),
                     })

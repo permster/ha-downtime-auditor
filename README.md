@@ -8,6 +8,7 @@ After every restart, crash or power loss, Downtime Auditor tells you:
 - **Interrupted:** every automation and script that was mid-run when HA went down. It shows the step it was stuck on (for example `delay 00:10:00`), how far it had got, and what triggered it.
 - **Missed:** every automation trigger that should have fired while HA was down: time, time pattern, sun, calendar, state, numeric state, template, zone and device triggers, plus event-style triggers (event, webhook, MQTT, tag, conversation) whose messages were lost.
 - **Fired at startup:** automations that fired in the first N seconds after boot. These are often spurious `unavailable → on` transitions.
+- **Reverted:** after a crash or power loss, states that came back older than they were. Helpers and other entities that restore their state get it from Home Assistant's saved copy, which is written only every 15 minutes, so a change made just before the crash is lost: an `input_boolean` switched on at 7:00:00 comes back off. See [Reverted states](#reverted-states).
 
 Each finding also says **how sure** it is (confidence) and **how much it matters** (severity, which you set per automation with a label). It checks the automation's **conditions** at the missed time, so a trigger whose conditions would have failed doesn't bother you. See [Severity, confidence and conditions](#severity-confidence-and-conditions).
 
@@ -94,6 +95,7 @@ Every finding has three separate attributes. They use the same words everywhere:
 | Interrupted | Was mid-run when HA went down; the remaining steps never ran. |
 | Missed | A trigger should have fired while HA was down. |
 | Fired at startup | Fired in the settle window after boot; may be spurious (for example `unavailable → on`). |
+| Reverted | After an unclean stop, came back with an older value than it had (Home Assistant's saved copy was older). |
 
 **Confidence: how sure it is that it happened** (never colored; shown as a 4-step meter)
 
@@ -130,10 +132,27 @@ The rating is then adjusted per finding. The dashboard's **Rules** tab lists the
 
 - **Conditions would have failed** → None. This includes actions that would all have been skipped (see [Condition checks](#condition-checks)).
 - **A time pattern that runs again soon** → None. A missed `/15` tick is only a delay: the pattern runs again within minutes of startup. Ticks whose next run is within *Time patterns that run again soon* (60 minutes by default) of Home Assistant starting are None; slower patterns keep their rating.
+- **A reverted state that's already back** to its value from before the stop → None.
 - **Fired at startup**, or **Unknown confidence** → capped at Low.
 - **Critical is never capped**, except by failed conditions. A Critical automation with an event, webhook, MQTT, tag or conversation trigger therefore raises a Critical **Repair on every restart**, because a message could have been lost each time. To avoid that, rate those triggers individually, or set *Severity for triggers that can't be confirmed* to None.
 
 Repairs, push and `binary_sensor.downtime_auditor_needs_attention` only consider findings at or above their minimum severity (see [Options](#options)).
+
+### Acting on a finding
+
+Missed and interrupted findings show **what the actions that didn't run would have changed**: each target entity, its live state, and whether that's already what the action would have set (*✓ as expected* or *⚠ expected on*). For a missed trigger these are the actions that would have run (the matching `choose` option); for an interrupted run, the step it stopped at and everything after it. Actions whose result can't be predicted (a toggle, a script, a templated value) just show the current state.
+
+**Run actions now** runs the automation's actions once (skipping its conditions), or starts the script again, after a confirmation. It isn't the same as the missed trigger: there's no trigger data, and the time and states are different, so check the result. If the actions choose by trigger id, the confirmation warns that they probably won't take the same path; setting the entities yourself may be safer.
+
+### Reverted states
+
+Entities that restore their state after a restart (helpers such as `input_boolean`, `input_number`, `input_select`, `counter`; trigger-based template sensors, `utility_meter`, optimistic template or MQTT entities, and custom ones) get it from Home Assistant's saved copy. Home Assistant writes that copy when it stops cleanly and every 15 minutes, so after a crash or power loss, anything changed since the last write comes back with its older value. Entities backed by a device aren't affected: they read the device after startup.
+
+Downtime Auditor keeps these entities' values itself, saved about a second after each change. After an unclean stop, any that came back different is a **Reverted** finding: *Was 'on' (set at 07:00:00), came back 'off' from Home Assistant's copy saved at 06:52:10*. The finding is **Confirmed** when it came back with Home Assistant's saved copy, and **Probable** when that copy isn't known. An entity that came back with neither value doesn't restore (an `initial:` value, or it resets by design), so it isn't reported.
+
+The finding shows the live value (*✓ as expected* or *⚠ expected on*), when the lost change was made, and the automations and scripts that use the entity, since they may have acted on the old value. **Set back to …** calls the matching action (`input_boolean.turn_on`, `input_number.set_value`, `input_select.select_option`, ...) after a confirmation; automations triggered by that change will run. A finding that's already back to its value when the report is made is None. Rate an entity like an automation, with a `downtime_auditor_sev` label (from the finding, or in the entity's settings).
+
+By default only restored entities that an automation or script uses are checked; *Check for reverted states* in the options can check all of them, or turn this off. Checking all of them includes fast-changing ones like utility meters, which nearly always come back older.
 
 ### Condition checks
 
@@ -199,6 +218,7 @@ All entities belong to the **Downtime Auditor** device.
 | `sensor.downtime_auditor_interrupted_automations` | automations/scripts with a finding of severity Low or higher | `findings` (list), `window`, `report_generated`, `truncated` |
 | `sensor.downtime_auditor_missed_triggers` | same | same |
 | `sensor.downtime_auditor_fired_at_startup` | same | same |
+| `sensor.downtime_auditor_reverted_states` | entities with a reverted finding of severity Low or higher | same |
 | `sensor.downtime_auditor_highest_severity` | `critical` / `high` / `medium` / `low` / `none` | |
 | `sensor.downtime_auditor_last_downtime_duration` | duration | `clean_shutdown`, `counts`, `counts_by_severity`, `highest_severity`, `needs_attention`, `skipped`, HA version before/after, `json_path` (`actionable` is deprecated) |
 | `sensor.downtime_auditor_last_downtime_start` / `_end` | timestamp | |
@@ -235,6 +255,7 @@ content: >
 | Show severity None in the dashboard | off | The dashboard also has its own toggle. |
 | Severity for triggers that can't be confirmed | Low | Event, webhook, MQTT, tag, conversation and device press triggers. **None** hides them (even in Critical automations). A rating set for one trigger always wins. |
 | Time patterns that run again soon | 60 min | A missed time pattern tick is None when the pattern runs again within this many minutes of Home Assistant starting. 0 turns it off. A rating set for one trigger always wins. |
+| Check for reverted states | Entities that automations or scripts use | Which restored entities are checked after an unclean stop: those an automation or script uses, all of them, or off. See [Reverted states](#reverted-states). |
 | Write JSON reports | on | Saves reports under `/config/downtime_auditor/`. The History tab needs this. |
 | Keep detailed reports for | 30 days | A full report is saved only when a downtime had a finding worth keeping (not severity None, and not just unconfirmable event-style triggers). Older reports are deleted, with a hard cap of 500 files. |
 | Keep history summary for | 365 days | One line per downtime (about 0.5 KB each), including restarts where nothing was found. |
@@ -270,7 +291,7 @@ After every analysis it fires `downtime_auditor_report` with:
 | Key | Contents |
 |---|---|
 | `window` | start/end, duration, clean shutdown |
-| `counts` | automations per type: `interrupted`, `missed`, `fired_at_startup` |
+| `counts` | automations (or entities, for `reverted`) per type: `interrupted`, `missed`, `fired_at_startup`, `reverted` |
 | `counts_by_severity` | `critical`, `high`, `medium`, `low`, `none` |
 | `highest_severity` | the most severe finding, or `null` if there were none |
 | `needs_attention` | number of findings at or above *Minimum severity for Repairs* |

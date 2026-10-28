@@ -40,6 +40,7 @@ SECTION_ORDER = [
     (FindingType.INTERRUPTED, "Interrupted mid-run"),
     (FindingType.MISSED, "Missed triggers"),
     (FindingType.FIRED_AT_STARTUP, "Fired at startup (check these weren't spurious)"),
+    (FindingType.REVERTED, "Reverted: states that came back older after the unclean stop"),
 ]
 
 

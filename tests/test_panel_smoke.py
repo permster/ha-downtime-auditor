@@ -74,6 +74,13 @@ async def test_panel_renders_real_reports(hass, enable_custom_integrations, hass
     auditor.prev = saved
     auditor.started_at = dt_util.utcnow()
     report = await auditor._async_analyze_previous_downtime()
+    # A reverted state, from the backend: vac was "off" before an unclean stop, came back "on".
+    was = (dt_util.utcnow() - timedelta(hours=2)).isoformat()
+    auditor.prev["restored"] = {"input_boolean.vac": {"state": "off", "changed": was}}
+    auditor._restored_at_start = {"input_boolean.vac": {"state": "on", "changed": was}}
+    auditor._saved_copies = {"input_boolean.vac": {"state": "on", "saved_at": was}}
+    reverted = auditor._reverted_findings()
+    auditor._rate(reverted)
     whatif = await auditor.async_analyze_window(dt_util.utcnow() - timedelta(hours=3), dt_util.utcnow(), False)
 
     # Add a v0.4 history line so the History tab shows a legacy entry too.
@@ -94,7 +101,8 @@ async def test_panel_renders_real_reports(hass, enable_custom_integrations, hass
 
     fixture = tmp_path / "panel_fixture.json"
     fixture.write_text(
-        json.dumps({"report": report, "whatif": whatif, "history": history, "status": status}, default=str),
+        json.dumps({"report": report, "whatif": whatif, "history": history, "status": status,
+                    "reverted": reverted[0].as_dict()}, default=str),
         encoding="utf-8",
     )
     proc = subprocess.run(

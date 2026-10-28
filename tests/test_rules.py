@@ -10,6 +10,8 @@ from custom_components.downtime_auditor.severity import effective_severity, seve
 # One example per rule: (effective_severity kwargs, expected severity) with the rule applying.
 EXAMPLES = {
     "conditions": (dict(base=Severity.CRITICAL, source="label", confidence="confirmed", conditions="fail"), "none"),
+    "already_back": (dict(base=Severity.CRITICAL, source="label", confidence="confirmed", finding_type="reverted",
+                          already_back=True), "none"),
     "trigger": (dict(base=Severity.HIGH, source="trigger", confidence="unknown"), "high"),
     "catch_up": (dict(base=Severity.CRITICAL, source="label", confidence="confirmed", caught_up_in=5), "none"),
     "critical": (dict(base=Severity.CRITICAL, source="label", confidence="confirmed", finding_type="fired_at_startup"),
@@ -18,10 +20,11 @@ EXAMPLES = {
 }
 
 
-def _apply(unconfirmable, limit, base, source, confidence, conditions=None, finding_type="missed", caught_up_in=None):
+def _apply(unconfirmable, limit, base, source, confidence, conditions=None, finding_type="missed", caught_up_in=None,
+           already_back=False):
     return effective_severity(
         base, source, finding_type, confidence, conditions, unconfirmable,
-        caught_up_in=caught_up_in, catch_up_limit=limit,
+        caught_up_in=caught_up_in, catch_up_limit=limit, already_back=already_back,
     )[0]
 
 

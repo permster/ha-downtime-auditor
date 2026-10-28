@@ -251,7 +251,8 @@ async def test_choose_names_the_option_that_runs(hass):
     res = _gate_result(hass, actions, trigger_id="sync")
     (step,) = [s for s in res["steps"] if s["condition"] == "actions"]
     assert step["runs"] == {"label": "choose", "certain": True, "options": [
-        {"option": 3, "alias": "Resync pool clock", "does": "script.opnpool_resync (+1 more)", "result": PASS}]}
+        {"option": 3, "alias": "Resync pool clock", "does": "script.opnpool_resync (+1 more)", "result": PASS,
+         "effects": []}]}
     by = {s["option"]: s for s in step["conditions"]}
     assert by[1]["other_trigger"] and not by[2]["other_trigger"]
     assert by[2]["does"] == "light.turn_on light.porch"

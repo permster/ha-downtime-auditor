@@ -67,6 +67,7 @@
           "show_severity_none": "Show severity None in the dashboard",
           "unconfirmable_severity": "Severity for triggers that can't be confirmed",
           "time_pattern_catch_up_minutes": "Time patterns that run again soon",
+          "reverted_scope": "Check for reverted states",
           "write_json": "Write JSON reports",
           "report_retention_days": "Keep detailed reports for",
           "history_retention_days": "Keep history summary for",
@@ -86,6 +87,7 @@
           "show_severity_none": "Findings with no impact (conditions would have failed, or rated None) are hidden by default.",
           "unconfirmable_severity": "Event, webhook, MQTT, tag, voice and device button/press triggers: anything sent while Home Assistant was down is lost, so whether one was missed can't be known. Low lists them; None hides them (even in Critical automations). A rating set for one trigger on the dashboard always wins.",
           "time_pattern_catch_up_minutes": "A missed time pattern tick is rated None when the pattern runs again within this many minutes of Home Assistant starting (a /15 or /30 pattern catches up on its own). 0 turns this off. A rating set for one trigger on the dashboard always wins.",
+          "reverted_scope": "After an unclean stop (crash, power loss), entities that restore their state can come back with Home Assistant's older saved copy, which is written only every 15 minutes. Downtime Auditor keeps their latest values and reports the ones that came back different. Device-backed entities aren't checked: they read the real device after startup.",
           "write_json": "Save reports under /config/downtime_auditor/ for the dashboard's History tab.",
           "report_retention_days": "Full reports are saved only for downtimes where something was found, and deleted after this many days (hard cap of 500 files).",
           "history_retention_days": "A one-line summary of every downtime, used by the History tab. Each line is about 0.5 KB.",
@@ -148,6 +150,10 @@
     "fired_at_startup": {
       "title": "Fired at startup: {name}",
       "description": "`{entity_id}` fired in the settle window right after Home Assistant started. Check it wasn't a spurious trigger (for example `unavailable \u2192 on`).\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+    },
+    "reverted": {
+      "title": "Reverted after restart: {name}",
+      "description": "`{entity_id}` came back with an older value after Home Assistant stopped uncleanly: the change made since Home Assistant last saved its states was lost. Check it, and anything that depends on it.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
     }
   },
   "entity": {
@@ -176,6 +182,13 @@
       "options": {
         "low": "Low (listed, no Repairs by default)",
         "none": "None (hidden)"
+      }
+    },
+    "reverted_scope": {
+      "options": {
+        "used": "Entities that automations or scripts use",
+        "all": "All entities that restore their state",
+        "off": "Off"
       }
     }
   }

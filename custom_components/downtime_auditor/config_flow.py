@@ -23,6 +23,7 @@ from .const import (
     CONF_SHOW_SEVERITY_NONE,
     CONF_UNCONFIRMABLE_SEVERITY,
     CONF_TIME_PATTERN_CATCH_UP,
+    CONF_REVERTED_SCOPE,
     CONF_HISTORY_DAYS,
     CONF_REPORT_DAYS,
     CONF_SIDEBAR_PANEL,
@@ -34,6 +35,7 @@ from .const import (
     Severity,
 )
 from .auditor import DEFAULTS
+from .reverts import SCOPES
 
 
 def _schema(values: dict[str, Any]) -> vol.Schema:
@@ -74,6 +76,13 @@ def _schema(values: dict[str, Any]) -> vol.Schema:
             ),
             vol.Required(CONF_TIME_PATTERN_CATCH_UP, default=d(CONF_TIME_PATTERN_CATCH_UP)): vol.All(
                 num(0, 1440, "min"), vol.Coerce(int)
+            ),
+            vol.Required(CONF_REVERTED_SCOPE, default=d(CONF_REVERTED_SCOPE)): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=list(SCOPES),
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    translation_key="reverted_scope",
+                )
             ),
             vol.Required(CONF_WRITE_JSON, default=d(CONF_WRITE_JSON)): bool,
             vol.Required(CONF_REPORT_DAYS, default=d(CONF_REPORT_DAYS)): vol.All(

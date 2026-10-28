@@ -169,14 +169,15 @@ async def ws_what_if(hass: HomeAssistant, connection: websocket_api.ActiveConnec
 @websocket_api.websocket_command(
     {
         vol.Required("type"): f"{DOMAIN}/set_severity",
-        vol.Required("entity_id"): vol.All(cv.entity_id, cv.entity_domain(("automation", "script"))),
+        # automations and scripts; any entity with a reverted finding
+        vol.Required("entity_id"): cv.entity_id,
         vol.Required("severity"): vol.Any(None, vol.In([s.value for s in Severity])),
     }
 )
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_set_severity(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
-    """Rate an automation/script by swapping its downtime_auditor_sev label (null = unrated)."""
+    """Rate an automation/script (or a reverted entity) by swapping its downtime_auditor_sev label (null = unrated)."""
     severity = Severity(msg["severity"]) if msg["severity"] else None
     try:
         async_set_severity(hass, msg["entity_id"], severity)

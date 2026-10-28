@@ -51,6 +51,10 @@ def _detail_text(finding: dict) -> str:
     elif d.get("for") is not None and not d.get("trigger"):
         period = fmt_period(d["for"]) if isinstance(d["for"], (int, float)) else d["for"]
         lines.append(f"`for:` {period}")
+    if d.get("used_by"):
+        lines.append("Used by: " + ", ".join(u.get("name") or u["entity_id"] for u in d["used_by"][:10]))
+    if (fix := d.get("set_back")) and not d.get("already_back"):
+        lines.append(f"To set it back: `{fix['action']}` (or use the dashboard's Set back button)")
     for run in d.get("runs") or []:
         if isinstance(run, dict) and run.get("last_step"):
             lines.append(f"Stopped at `{run['last_step']}` (run {str(run.get('run_id'))[:8]})")

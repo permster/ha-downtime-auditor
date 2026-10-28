@@ -80,7 +80,7 @@ const tick = () => new Promise((r) => setImmediate(r));
   // ---- report tab: severity is the colored element; confidence is a neutral meter + word
   assert(html.includes("Highest severity: High"), "hero shows highest severity");
   assert(!html.includes("Possibly missed") && !html.includes("Unverifiable"), "old categories gone");
-  for (const t of ["Interrupted", "Missed", "Fired at startup"]) assert(html.includes(`<div class="l">${t}</div>`), "tile " + t);
+  for (const t of ["Interrupted", "Missed", "Fired at startup", "Reverted"]) assert(html.includes(`<div class="l">${t}</div>`), "tile " + t);
   assert((html.match(/class="sev-badge"/g) || []).length >= 3, "a severity badge per row");
   assert(html.includes('class="tag conf"') && html.includes("Confirmed") && html.includes("Unknown"), "confidence word");
   assert(!/conf-(high|medium)/.test(html), "no colored confidence classes");
@@ -92,7 +92,7 @@ const tick = () => new Promise((r) => setImmediate(r));
   const morning = fixture.report.findings.find((f) => f.name === "Morning");
   const key = p._key(fixture.report, morning);
   const saved = JSON.parse(storage.getItem("downtime_auditor_panel_v1"));
-  assert.deepStrictEqual(saved.types, ["interrupted", "missed", "fired_at_startup"], "state mirrored to sessionStorage");
+  assert.deepStrictEqual(saved.types, ["interrupted", "missed", "fired_at_startup", "reverted"], "state mirrored to sessionStorage");
   STATE.open.push(key);
   p._render();
   html = p.shadowRoot.innerHTML;
@@ -157,6 +157,59 @@ const tick = () => new Promise((r) => setImmediate(r));
   assert((html.match(/class="rule /g) || []).length === fixture.status.severity_rules.adjust.length, "rules: every adjustment listed");
   p._setTab("report");
 
+  // ---- what it would have changed (live states), and Run actions now with its disclaimer
+  const calls = [];
+  p._hass.states = {
+    "input_boolean.night": { state: "off", attributes: { friendly_name: "Night" } },
+    "input_boolean.day": { state: "off", attributes: {} },
+  };
+  p._hass.callService = async (...args) => { calls.push(args); };
+  const dn = {
+    type: "missed", entity_id: "automation.day_night", name: "Day night", severity: "medium", confidence: "confirmed",
+    summary: "Sun sunset was due", trigger_index: 0,
+    details: { effects: { certain: true, by_trigger: true, items: [
+      { entity_id: "input_boolean.night", action: "input_boolean.turn_on", expected: "on" },
+      { entity_id: "input_boolean.day", action: "input_boolean.turn_off", expected: "off" }] } },
+  };
+  STATE.open.push("dn");
+  let row = p._row(dn, "dn");
+  assert(row.includes("Would have changed") && row.includes("⚠ expected on") && row.includes("✓ as expected"),
+    "effects compared with live states");
+  assert(row.includes('data-run="dn"') && !row.includes("run-confirm"), "run button, no confirmation yet");
+  p._confirmRun = "dn";
+  row = p._row(dn, "dn");
+  assert(row.includes("may not do what you expect") && row.includes("Check the results afterwards"), "the disclaimer");
+  assert(row.includes("trigger ids"), "warns when the actions depend on which trigger fired");
+  await p._runNow("automation.day_night");
+  assert.strictEqual(JSON.stringify(calls.pop()),
+    JSON.stringify(["automation", "trigger", { entity_id: "automation.day_night", skip_condition: true }]), "runs the actions");
+  assert(p.shadowRoot.innerHTML.includes("Check that it did what you expected"), "reminder after running");
+  STATE.open.pop();
+
+  // ---- a reverted state: live value, the lost change, who uses it, and Set back with a confirmation
+  const rv = fixture.reverted;
+  p._hass.states = { "input_boolean.vac": { state: "on", attributes: { friendly_name: "vac" } } };
+  STATE.open.push("rv");
+  row = p._row(rv, "rv");
+  assert(row.includes("Now") && row.includes("⚠ expected off"), "live value compared with the one before the stop");
+  assert(row.includes("Lost change") && row.includes("saved copy was from"), "when the change was made, and HA's older copy");
+  assert(row.includes("Rate this entity") && row.includes('data-rate="input_boolean.vac"'), "the entity can be rated");
+  assert(row.includes('data-run="rv"') && row.includes("Set back to off") && !row.includes("Run actions now"), "set back, not run");
+  p._confirmRun = "rv";
+  row = p._row(rv, "rv");
+  assert(row.includes("Automations triggered by this change will run"), "set-back confirmation");
+  await p._setBack(rv.details.set_back);
+  assert.strictEqual(JSON.stringify(calls.pop()),
+    JSON.stringify(["input_boolean", "turn_off", { entity_id: "input_boolean.vac" }]), "sets it back");
+  assert(p.shadowRoot.innerHTML.includes("Check it has the value you expected"), "reminder after setting it back");
+  p._hass.states = { "input_boolean.vac": { state: "off", attributes: {} } };
+  assert(p._row(rv, "rv").includes("✓ as expected"), "shows when it's right again");
+  STATE.open.pop();
+  // An older saved filter (before reverted existed) shows the new type.
+  const env2 = makeEnv(memoryStorage());
+  env2.ctx.window.sessionStorage.setItem("downtime_auditor_panel_v1", JSON.stringify({ types: ["missed"] }));
+  assert.strictEqual(vm.runInContext("JSON.stringify(loadState().types)", env2.ctx), '["missed","reverted"]', "new type shown by default");
+
   // ---- filters
   STATE.minSeverity = "high";
   p._render();
@@ -170,7 +223,7 @@ const tick = () => new Promise((r) => setImmediate(r));
   STATE.types = ["interrupted"];
   p._render();
   assert(p.shadowRoot.innerHTML.includes("(0 of 3)"), "type filter");
-  STATE.types = ["interrupted", "missed", "fired_at_startup"];
+  STATE.types = ["interrupted", "missed", "fired_at_startup", "reverted"];
 
   // severity None hidden unless shown
   const withNone = JSON.parse(JSON.stringify(fixture.report));

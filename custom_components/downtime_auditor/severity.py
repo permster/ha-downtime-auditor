@@ -57,18 +57,22 @@ def effective_severity(
     unconfirmable: str = Severity.LOW,
     caught_up_in: float | None = None,
     catch_up_limit: int = 0,
+    already_back: bool = False,
 ) -> tuple[Severity, str]:
     """Return (severity, reason) for one finding.
 
-    Precedence: failed conditions (None) > a rating set for this trigger (as is) >
+    Precedence: failed conditions, or a reverted state that's already back (None) > a rating set for this trigger (as is) >
     the "can't be confirmed" option set to None > a time pattern that runs again soon (None) >
     Critical (never capped) > caps.
     `unconfirmable` is that option: Low (cap Unknown-confidence triggers at Low) or None.
     `caught_up_in`: minutes from startup to a time pattern's next tick; None within
     `catch_up_limit` minutes (0 = off).
+    `already_back`: a reverted state had its value from before the stop again when the report was made.
     """
     if conditions == "fail":
         return Severity.NONE, "conditions would not have passed"
+    if already_back:
+        return Severity.NONE, "it's already back to its value from before the stop"
     if source == SEVERITY_SOURCE_TRIGGER:
         return base, "set for this trigger"
     why_base = "set by label" if source == SEVERITY_SOURCE_LABEL else "default for unrated automations"
@@ -101,6 +105,8 @@ def severity_rules(unconfirmable: str = Severity.LOW, catch_up_limit: int = 0) -
     }
     adjust = [
         {"key": "conditions", "when": "Its conditions, or the gates in its actions, would have failed",
+         "then": "None", "on": True},
+        {"key": "already_back", "when": "A reverted state is already back to its value from before the stop",
          "then": "None", "on": True},
         {"key": "trigger", "when": "You rated this trigger on the dashboard", "then": "kept as rated", "on": True},
     ]
