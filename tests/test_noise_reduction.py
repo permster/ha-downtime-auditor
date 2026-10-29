@@ -3,6 +3,7 @@
 import copy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -11,6 +12,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
+from custom_components.downtime_auditor import conditions
 from custom_components.downtime_auditor.conditions import (
     FAIL,
     PASS,
@@ -266,3 +268,12 @@ async def test_choose_with_an_option_that_cant_be_checked(hass):
     (step,) = [s for s in _gate_result(hass, actions, trigger_id="sync")["steps"] if s["condition"] == "actions"]
     assert step["runs"]["certain"] is False
     assert [o.get("option") for o in step["runs"]["options"]] == [1, 2]
+
+
+def test_condition_entities_skips_unreplayable_templates(hass):
+    """Templates that use trigger/this/now() aren't rendered: they log a warning every heartbeat, and can't be checked anyway."""
+    confs = [{"condition": "template", "value_template": "{{ trigger.id == 'a' and is_state('light.x', 'on') }}"},
+             {"condition": "template", "value_template": "{{ is_state('light.y', 'on') }}"}]
+    with patch.object(conditions, "Template", wraps=conditions.Template) as tpl:
+        assert set(condition_entities(hass, confs)) == {"light.y"}
+    assert tpl.call_count == 1  # the trigger template was never rendered

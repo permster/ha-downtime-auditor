@@ -361,7 +361,8 @@ def condition_entities(hass: HomeAssistant, confs: Iterable[dict]) -> dict[str, 
         for value in as_list(o.get("state")):
             if isinstance(value, str) and INPUT_ENTITY_ID.match(value):
                 add(value)
-        if kind == "template" and (src := _src(o.get("value_template"))):
+        # the check can't replay these (no trigger data, or the time now), and rendering logs a warning
+        if kind == "template" and (src := _src(o.get("value_template"))) and not UNREPLAYABLE.search(src):
             try:
                 info = Template(src, hass).async_render_to_info()
                 for eid in info.entities:
