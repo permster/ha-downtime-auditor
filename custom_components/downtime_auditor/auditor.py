@@ -90,6 +90,7 @@ from .effects import extract_effects, remaining_effects, uses_trigger_ids
 from .labels import SeverityLookup
 from .repairs import async_sync_issues
 from .report import (
+    ack_key,
     async_deliver,
     async_update_json,
     async_write_json,
@@ -1110,6 +1111,30 @@ class DowntimeAuditor:
                 "json_path": json_path,
             },
         )
+
+    async def async_acknowledge(
+        self, finding_type: str, entity_id: str, acknowledged: bool = True, report_id: str | None = None
+    ) -> bool:
+        """Mark a finding of the last report as handled (or not): clears its Repairs issue.
+
+        Only this report: ratings don't change, so a later downtime reports it again.
+        """
+        rep = self.last_report
+        if not rep or (report_id and rep.get("generated_at") != report_id):
+            return False
+        key = ack_key({"type": finding_type, "entity_id": entity_id})
+        if not any(ack_key(f) == key for f in rep.get("findings") or []):
+            return False
+        acks = rep.setdefault("acknowledged", {})
+        if acknowledged:
+            acks.setdefault(key, dt_util.utcnow().isoformat())
+        else:
+            acks.pop(key, None)
+            for f in rep["findings"]:
+                if ack_key(f) == key:
+                    f.pop("acknowledged", None)
+        await self._async_report_changed(rep, [])
+        return True
 
     async def async_dismiss_repairs(self) -> int:
         ids = self.data.get("repair_issues") or []

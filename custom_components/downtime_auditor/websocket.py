@@ -23,6 +23,7 @@ from .const import (
     DOMAIN,
     HISTORY_FILE,
     REPORT_DIR,
+    FindingType,
     Severity,
 )
 from .labels import async_create_labels, async_set_severity
@@ -49,6 +50,7 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_set_severity)
     websocket_api.async_register_command(hass, ws_set_trigger_severity)
     websocket_api.async_register_command(hass, ws_create_severity_labels)
+    websocket_api.async_register_command(hass, ws_acknowledge)
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/status"})
@@ -228,3 +230,25 @@ def ws_create_severity_labels(
 ) -> None:
     """Dashboard button: create any missing severity labels."""
     connection.send_result(msg["id"], {"created": async_create_labels(hass)})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/acknowledge",
+        vol.Required("finding_type"): vol.In([t.value for t in FindingType]),
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Optional("acknowledged", default=True): bool,
+        vol.Optional("report"): str,  # the report the dashboard shows; refused if it was replaced
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_acknowledge(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Acknowledge a finding of the latest report (or undo it): only this report, its Repairs issue clears."""
+    auditor = _auditor(hass)
+    if auditor is None or not await auditor.async_acknowledge(
+        msg["finding_type"], msg["entity_id"], msg["acknowledged"], msg.get("report")
+    ):
+        connection.send_error(msg["id"], "not_found", "That finding isn't in the latest report")
+        return
+    connection.send_result(msg["id"], {"acknowledged": msg["acknowledged"]})

@@ -43,7 +43,7 @@ class _Base(BinarySensorEntity):
 
 
 class NeedsAttention(_Base):
-    """On when the last report has a finding at or above the Repairs severity threshold."""
+    """On when the last report has an unacknowledged finding at or above the Repairs severity threshold."""
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
 
@@ -57,7 +57,7 @@ class NeedsAttention(_Base):
             return None
         minimum = self.auditor.opt(CONF_REPAIRS_MIN_SEVERITY)
         return any(
-            f.get("severity") != Severity.NONE and at_least(f.get("severity"), minimum)
+            f.get("severity") != Severity.NONE and at_least(f.get("severity"), minimum) and not f.get("acknowledged")
             for f in rep.get("findings") or []
         )
 

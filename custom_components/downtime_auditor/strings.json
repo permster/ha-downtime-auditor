@@ -25,7 +25,7 @@
         },
         "data_description": {
           "sidebar_panel": "Add a Downtime Auditor dashboard to the sidebar (admins only).",
-          "repairs": "Raise an issue in Settings \u2192 Repairs for findings at or above the minimum severity below.",
+          "repairs": "Raise an issue in Settings → Repairs for findings at or above the minimum severity below.",
           "repairs_min_severity": "Only findings at this severity or higher raise a Repairs issue and turn on Needs attention.",
           "persistent_notification": "Also post the full report to the notification panel (off by default; the dashboard replaces it).",
           "notify_service": "e.g. notify.mobile_app_pixel_8 or script.notify_send_message_to_phone (receives title + message). Leave blank to disable.",
@@ -78,7 +78,7 @@
         },
         "data_description": {
           "sidebar_panel": "Add a Downtime Auditor dashboard to the sidebar (admins only).",
-          "repairs": "Raise an issue in Settings \u2192 Repairs for findings at or above the minimum severity below.",
+          "repairs": "Raise an issue in Settings → Repairs for findings at or above the minimum severity below.",
           "repairs_min_severity": "Only findings at this severity or higher raise a Repairs issue and turn on Needs attention.",
           "persistent_notification": "Also post the full report to the notification panel (off by default; the dashboard replaces it).",
           "notify_service": "e.g. notify.mobile_app_pixel_8 or script.notify_send_message_to_phone (receives title + message). Leave blank to disable.",
@@ -136,24 +136,86 @@
     "create_severity_labels": {
       "name": "Create severity labels",
       "description": "Create any missing downtime_auditor_sev labels (Critical, High, Medium, Low, None). Existing labels are left unchanged."
+    },
+    "acknowledge": {
+      "name": "Acknowledge a finding",
+      "description": "Mark a finding of the latest report as handled, for this report only: its Repairs issue clears and Needs attention ignores it. Its rating doesn't change, so a future downtime reports it again.",
+      "fields": {
+        "entity_id": {
+          "name": "Entity",
+          "description": "The automation or script (or the entity, for a reverted state)."
+        },
+        "type": {
+          "name": "Finding type",
+          "description": "Which of its findings."
+        },
+        "acknowledged": {
+          "name": "Acknowledged",
+          "description": "Turn off to undo an acknowledgement."
+        }
+      }
     }
   },
   "issues": {
     "interrupted": {
       "title": "Interrupted by downtime: {name}",
-      "description": "`{entity_id}` was running when Home Assistant went down and did not finish.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+      "description": "`{entity_id}` was running when Home Assistant went down and did not finish.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report. Select it to acknowledge the finding, or ignore it.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Acknowledge: {name}",
+            "description": "`{entity_id}` was running when Home Assistant went down and did not finish.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report.\n\n**Submit** acknowledges this finding for this report only: this issue clears and the dashboard marks it acknowledged. Its rating doesn't change, so a future downtime reports it again as usual."
+          }
+        },
+        "abort": {
+          "report_replaced": "A newer report replaced the one this finding is from."
+        }
+      }
     },
     "missed": {
       "title": "Missed during downtime: {name}",
-      "description": "`{entity_id}` had a trigger that should have fired while Home Assistant was down.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+      "description": "`{entity_id}` had a trigger that should have fired while Home Assistant was down.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report. Select it to acknowledge the finding, or ignore it.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Acknowledge: {name}",
+            "description": "`{entity_id}` had a trigger that should have fired while Home Assistant was down.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report.\n\n**Submit** acknowledges this finding for this report only: this issue clears and the dashboard marks it acknowledged. Its rating doesn't change, so a future downtime reports it again as usual."
+          }
+        },
+        "abort": {
+          "report_replaced": "A newer report replaced the one this finding is from."
+        }
+      }
     },
     "fired_at_startup": {
       "title": "Fired at startup: {name}",
-      "description": "`{entity_id}` fired in the settle window right after Home Assistant started. Check it wasn't a spurious trigger (for example `unavailable \u2192 on`).\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+      "description": "`{entity_id}` fired in the settle window right after Home Assistant started. Check it wasn't a spurious trigger (for example `unavailable → on`).\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report. Select it to acknowledge the finding, or ignore it.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Acknowledge: {name}",
+            "description": "`{entity_id}` fired in the settle window right after Home Assistant started. Check it wasn't a spurious trigger (for example `unavailable → on`).\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report.\n\n**Submit** acknowledges this finding for this report only: this issue clears and the dashboard marks it acknowledged. Its rating doesn't change, so a future downtime reports it again as usual."
+          }
+        },
+        "abort": {
+          "report_replaced": "A newer report replaced the one this finding is from."
+        }
+      }
     },
     "reverted": {
       "title": "Reverted after restart: {name}",
-      "description": "`{entity_id}` came back with an older value after Home Assistant stopped uncleanly: the change made since Home Assistant last saved its states was lost. Check it, and anything that depends on it.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report, or you can ignore it."
+      "description": "`{entity_id}` came back with an older value after Home Assistant stopped uncleanly: the change made since Home Assistant last saved its states was lost. Check it, and anything that depends on it.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report. Select it to acknowledge the finding, or ignore it.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Acknowledge: {name}",
+            "description": "`{entity_id}` came back with an older value after Home Assistant stopped uncleanly: the change made since Home Assistant last saved its states was lost. Check it, and anything that depends on it.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report.\n\n**Submit** acknowledges this finding for this report only: this issue clears and the dashboard marks it acknowledged. Its rating doesn't change, so a future downtime reports it again as usual."
+          }
+        },
+        "abort": {
+          "report_replaced": "A newer report replaced the one this finding is from."
+        }
+      }
     }
   },
   "entity": {
@@ -189,6 +251,14 @@
         "used": "Entities that automations or scripts use",
         "all": "All entities that restore their state",
         "off": "Off"
+      }
+    },
+    "finding_type": {
+      "options": {
+        "interrupted": "Interrupted",
+        "missed": "Missed",
+        "fired_at_startup": "Fired at startup",
+        "reverted": "Reverted"
       }
     }
   }

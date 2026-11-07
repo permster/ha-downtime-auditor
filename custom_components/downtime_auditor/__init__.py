@@ -21,7 +21,9 @@ from .const import (
     CONFIG_ENTRY_VERSION,
     DOMAIN,
     LEGACY_OPTIONS,
+    FindingType,
     Severity,
+    SERVICE_ACKNOWLEDGE,
     SERVICE_ANALYZE_WINDOW,
     SERVICE_CREATE_SEVERITY_LABELS,
     SERVICE_DISMISS_REPAIRS,
@@ -42,6 +44,14 @@ ANALYZE_SCHEMA = vol.Schema(
         vol.Required("start"): cv.datetime,
         vol.Required("end"): cv.datetime,
         vol.Optional("notify", default=True): cv.boolean,
+    }
+)
+
+ACKNOWLEDGE_SCHEMA = vol.Schema(
+    {
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Required("type"): vol.In([t.value for t in FindingType]),
+        vol.Optional("acknowledged", default=True): cv.boolean,
     }
 )
 
@@ -79,6 +89,11 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     async def create_severity_labels(call: ServiceCall) -> ServiceResponse:
         return {"created": async_create_labels(hass)}
 
+    async def acknowledge(call: ServiceCall) -> None:
+        d = call.data
+        if not await _auditor(hass).async_acknowledge(d["type"], d["entity_id"], d["acknowledged"]):
+            raise HomeAssistantError(f"The latest report has no {d['type']} finding for {d['entity_id']}")
+
     hass.services.async_register(
         DOMAIN, SERVICE_ANALYZE_WINDOW, analyze_window, ANALYZE_SCHEMA, SupportsResponse.OPTIONAL
     )
@@ -95,6 +110,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         create_severity_labels,
         supports_response=SupportsResponse.OPTIONAL,
     )
+    hass.services.async_register(DOMAIN, SERVICE_ACKNOWLEDGE, acknowledge, ACKNOWLEDGE_SCHEMA)
     async_register_ws(hass)
     return True
 

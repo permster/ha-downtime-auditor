@@ -64,7 +64,7 @@ def _summarize(findings: list[dict[str, Any]], attention_min: str | None) -> dic
     attention = (
         None
         if attention_min is None
-        else sum(1 for f in findings if at_least(f["severity"], attention_min))
+        else sum(1 for f in findings if at_least(f["severity"], attention_min) and not f.get("acknowledged"))
     )
     return {
         "counts": counts,
@@ -172,9 +172,18 @@ def build_report(
     }
 
 
+def ack_key(finding: dict[str, Any]) -> str:
+    """Key of a finding in the report's `acknowledged` map (one finding per automation and type)."""
+    return f"{finding['type']}|{finding['entity_id']}"
+
+
 def refresh_summary(report: dict[str, Any], attention_min: str) -> None:
     """Recompute groups, ordering and roll-ups after findings' severities changed."""
     report["findings"] = group_findings(report["findings"])
+    acks = report.get("acknowledged") or {}
+    for f in report["findings"]:  # groups are rebuilt above, so the flag comes from the report's map
+        if ack_key(f) in acks:
+            f["acknowledged"] = acks[ack_key(f)]
     summary = _summarize(report["findings"], attention_min)
     report.update(summary, actionable=summary["needs_attention"])
 

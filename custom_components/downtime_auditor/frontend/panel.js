@@ -68,6 +68,7 @@ const DEFAULT_STATE = () => ({
   minSeverity: "all",
   confidences: CONFIDENCES.map((c) => c.key),
   showNone: null, // null = follow the integration option
+  hideAcknowledged: false,
   search: "",
   open: [],
   viewingFile: null,
@@ -326,6 +327,7 @@ class DowntimeAuditorPanel extends HTMLElement {
   _visible(f) {
     if (!STATE.types.includes(f.type)) return false;
     if (!STATE.confidences.includes(f.confidence)) return false;
+    if (f.acknowledged && STATE.hideAcknowledged) return false;
     if (f.severity === "none") return this._showNone();
     if (STATE.minSeverity !== "all" && rank(f.severity) < rank(STATE.minSeverity)) return false;
     return this._matches(f);
@@ -351,6 +353,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     const findings = rep.findings || [];
     const shown = findings.filter((f) => this._visible(f));
     const noneCount = findings.filter((f) => f.severity === "none").length;
+    const ackCount = findings.filter((f) => f.acknowledged).length;
     const skipped = rep.skipped ?? meta.automations_skipped ?? 0;
     const verBump = meta.ha_version_before && meta.ha_version_before !== meta.ha_version_after;
     const top = rep.highest_severity;
@@ -396,7 +399,7 @@ class DowntimeAuditorPanel extends HTMLElement {
           <h3>Findings <span class="muted">(${shown.length} of ${findings.length})</span></h3>
           <input class="search" type="search" placeholder="Search name, entity, summary…" value="${esc(STATE.search)}">
         </div>
-        ${this._filterBar(noneCount)}
+        ${this._filterBar(noneCount, ackCount)}
         ${!findings.length ? `<div class="all-good"><ha-icon icon="mdi:shield-check-outline"></ha-icon>
             Nothing was missed or interrupted${whatIf ? " in this window" : ""}.</div>` : ""}
         ${shown.map((f) => this._row(f, this._key(rep, f), { canRate: !rep.legacy })).join("")}
@@ -447,7 +450,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     return [rep.generated_at, f.type, f.entity_id].join("|"); // one finding per automation and type
   }
 
-  _filterBar(noneCount) {
+  _filterBar(noneCount, ackCount = 0) {
     const showNone = this._showNone();
     return `<div class="filters">
       <label class="fl">Minimum severity
@@ -461,6 +464,8 @@ class DowntimeAuditorPanel extends HTMLElement {
       </div>
       <label class="fl toggle"><input type="checkbox" data-act="show-none" ${showNone ? "checked" : ""}>
         Show severity None <span class="muted">(${noneCount})</span></label>
+      ${ackCount ? `<label class="fl toggle"><input type="checkbox" data-act="hide-ack" ${STATE.hideAcknowledged ? "checked" : ""}>
+        Hide acknowledged <span class="muted">(${ackCount})</span></label>` : ""}
     </div>`;
   }
 
@@ -559,7 +564,7 @@ class DowntimeAuditorPanel extends HTMLElement {
     const open = STATE.open.includes(key);
     const cond = (f.details || {}).conditions || {};
     const trig = f.trigger_id ? `trigger “${esc(f.trigger_id)}”` : f.trigger_index != null ? `trigger #${f.trigger_index}` : "";
-    return `<div class="row ${open ? "open" : ""} ${f.severity === "none" ? "dim" : ""}" style="--s:${sev ? sev.color : "var(--da-line)"}">
+    return `<div class="row ${open ? "open" : ""} ${f.severity === "none" || f.acknowledged ? "dim" : ""}" style="--s:${sev ? sev.color : "var(--da-line)"}">
       <button class="row-head" data-toggle="${esc(key)}" aria-expanded="${open}">
         <ha-icon icon="${t.icon}" class="type-ico" title="${esc(t.label)}"></ha-icon>
         <div class="row-main">
@@ -567,6 +572,7 @@ class DowntimeAuditorPanel extends HTMLElement {
           <div class="row-sum">${esc(f.summary)}</div>
         </div>
         <div class="row-tags">
+          ${f.acknowledged ? `<span class="tag ack" title="Acknowledged ${esc(fmtTime(f.acknowledged))}"><ha-icon icon="mdi:check"></ha-icon>Acknowledged</span>` : ""}
           ${sev ? `<span class="sev-badge" style="--s:${sev.color}">${sev.label}</span>` : live ? `<span class="tag">running</span>` : ""}
           ${f.confidence && CONF[f.confidence] ? `<span class="tag conf" title="Confidence: ${esc(CONF[f.confidence].label)}">${this._meter(f.confidence)} ${esc(CONF[f.confidence].label)}</span>` : ""}
           ${cond.likely === "fail" ? `<span class="tag" title="${esc(cond.why)}">conditions?</span>` : ""}
@@ -575,7 +581,7 @@ class DowntimeAuditorPanel extends HTMLElement {
           <ha-icon icon="${open ? "mdi:chevron-up" : "mdi:chevron-down"}"></ha-icon>
         </div>
       </button>
-      ${open ? `<div class="row-body">${this._details(f, { canRate: canRate && !live })}${canRate && !live ? this._runSection(f, key) : ""}<div class="links">${this._editorLinks(f).join("")}</div></div>` : ""}
+      ${open ? `<div class="row-body">${this._details(f, { canRate: canRate && !live })}${canRate && !live ? this._runSection(f, key) : ""}${live ? "" : this._ackSection(f)}<div class="links">${this._editorLinks(f).join("")}</div></div>` : ""}
     </div>`;
   }
 
@@ -656,6 +662,28 @@ class DowntimeAuditorPanel extends HTMLElement {
       this._error = e.message || String(e);
     }
     this._render();
+  }
+
+  // Acknowledge: handled for this report only (its Repairs issue clears); a later downtime reports it again.
+  _ackSection(f) {
+    if (STATE.tab !== "report" || STATE.viewingFile) return "";
+    const which = esc(JSON.stringify({ finding_type: f.type, entity_id: f.entity_id }));
+    if (f.acknowledged) {
+      return `<div class="run-fix"><button class="btn secondary" data-ack="${which}" data-ack-on="">Undo acknowledge</button>
+        <span class="muted small-inline">Acknowledged ${esc(fmtTime(f.acknowledged))}, for this report only.</span></div>`;
+    }
+    return `<div class="run-fix"><button class="btn secondary" data-ack="${which}" data-ack-on="1">Acknowledge</button>
+      <span class="muted small-inline">Marks it handled for this report and clears its Repairs issue. A future downtime reports it again.</span></div>`;
+  }
+
+  async _acknowledge(which, on) {
+    try {
+      await this._ws("acknowledge", { ...which, acknowledged: on, report: this._report?.generated_at });
+      this._error = null;
+    } catch (e) {
+      this._error = e.message || String(e);
+    }
+    await this._loadReport();
   }
 
   // "Run actions now", with a confirmation that says what it can't do.
@@ -1029,6 +1057,8 @@ class DowntimeAuditorPanel extends HTMLElement {
     });
     on("select[data-act=min-severity]", "change", (el) => { STATE.minSeverity = el.value; this._render(); });
     on("input[data-act=show-none]", "change", (el) => { STATE.showNone = el.checked; this._render(); });
+    on("input[data-act=hide-ack]", "change", (el) => { STATE.hideAcknowledged = el.checked; this._render(); });
+    on("button[data-ack]", "click", (el) => this._acknowledge(JSON.parse(el.dataset.ack), Boolean(el.dataset.ackOn)));
     on("select[data-rate]", "change", (el) => this._rate(el.dataset.rate, el.value || null));
     on("select[data-rate-trigger]", "change", (el) => this._rateTrigger(JSON.parse(el.dataset.rateTrigger), el.value || null));
     on("button[data-run]", "click", (el) => { this._confirmRun = el.dataset.run; this._render(); });
@@ -1210,6 +1240,8 @@ svg text { fill: var(--da-muted); font-size: 11px; }
 .meter i.f { background: var(--da-muted); }
 .row { border: 1px solid var(--da-line); border-left: 4px solid var(--s); border-radius: 8px; margin: 8px 0; overflow: hidden; }
 .row.dim { opacity: .7; }
+.tag.ack { display: inline-flex; align-items: center; gap: 2px; }
+.tag.ack ha-icon { --mdc-icon-size: 14px; }
 .row-head { display: flex; gap: 12px; align-items: flex-start; width: 100%; background: none; border: 0; padding: 10px 12px; text-align: left; cursor: pointer; color: var(--da-text); font: inherit; }
 .row-head:hover { background: color-mix(in srgb, var(--s) 6%, transparent); }
 .type-ico { color: var(--da-muted); --mdc-icon-size: 20px; margin-top: 2px; flex: none; }

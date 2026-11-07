@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+import voluptuous as vol
+
+from homeassistant.components.repairs import RepairsFlow
 from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import issue_registry as ir
 
 from .const import CONFIDENCE_LABELS, DOMAIN, PANEL_URL, SEVERITY_LABELS, Severity
@@ -91,12 +95,14 @@ def async_sync_issues(
             break
         if finding.get("severity") == Severity.NONE or not at_least(finding.get("severity"), min_severity):
             continue
+        if finding.get("acknowledged"):
+            continue
         issue_id = _issue_id(report, finding)
         ir.async_create_issue(
             hass,
             DOMAIN,
             issue_id,
-            is_fixable=False,
+            is_fixable=True,  # the fix flow acknowledges the finding
             is_persistent=True,
             severity=(
                 ir.IssueSeverity.ERROR
@@ -115,7 +121,40 @@ def async_sync_issues(
                 "details": _detail_text(finding),
                 "panel": f"/{PANEL_URL}",
             },
-            data={"report": report["generated_at"], "entity_id": finding.get("entity_id")},
+            data={"report": report["generated_at"], "type": finding["type"], "entity_id": finding.get("entity_id")},
         )
         new_ids.append(issue_id)
     return new_ids
+
+
+class AcknowledgeFlow(RepairsFlow):
+    """Submit acknowledges the finding for this report; a later downtime raises it again."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        if user_input is not None:
+            auditor = self.hass.data.get(DOMAIN)
+            d = self._data
+            if auditor is None or not await auditor.async_acknowledge(
+                str(d.get("type")), str(d.get("entity_id")), True, d.get("report")
+            ):
+                return self.async_abort(reason="report_replaced")
+            return self.async_create_entry(data={})
+        issue = ir.async_get(self.hass).async_get_issue(DOMAIN, self.issue_id)
+        return self.async_show_form(
+            step_id="confirm",
+            data_schema=vol.Schema({}),
+            description_placeholders=dict(issue.translation_placeholders or {}) if issue else None,
+        )
+
+
+async def async_create_fix_flow(
+    hass: HomeAssistant, issue_id: str, data: dict[str, str | int | float | None] | None
+) -> RepairsFlow:
+    """Repairs platform: every issue's fix is acknowledging its finding."""
+    return AcknowledgeFlow(dict(data or {}))

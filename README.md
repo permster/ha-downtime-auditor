@@ -24,7 +24,7 @@ Results show up in four places:
    - **Rules:** how severity is decided, with your current options: where the starting rating comes from, then each adjustment in the order it's applied (and which ones are off).
 
    Right after a restart, the dashboard shows when the new report will be ready (it waits for the *startup settle delay* first), and updates by itself when it arrives. If the integration was updated while the page was open, it asks you to reload.
-2. **Settings → Repairs:** one issue per automation or script with a finding at or above a minimum severity (all its missed triggers are listed in the issue), the way Spook raises its issues. Previous issues are replaced by each new report. You can ignore them individually or clear them with a service.
+2. **Settings → Repairs:** one issue per automation or script with a finding at or above a minimum severity (all its missed triggers are listed in the issue), the way Spook raises its issues. Previous issues are replaced by each new report. Select one to [acknowledge](#acknowledging-a-finding) its finding, ignore it, or clear them all with a service.
 3. **Entities** (Watchman-style) on a *Downtime Auditor* device: one count sensor per finding type, with the findings in a `findings` attribute (excluded from the recorder), a highest-severity sensor, duration and timestamp sensors, and problem binary sensors.
 4. **JSON history** under `/config/downtime_auditor/` (see [History and retention](#history-and-retention)), plus an optional phone push. A persistent notification is also available but is off by default.
 
@@ -224,7 +224,7 @@ All entities belong to the **Downtime Auditor** device.
 | `sensor.downtime_auditor_last_downtime_start` / `_end` | timestamp | |
 | `sensor.downtime_auditor_last_report` | timestamp | |
 | `sensor.downtime_auditor_last_heartbeat` (diagnostic, disabled by default) | timestamp | `tracking`, `running_now` |
-| `binary_sensor.downtime_auditor_needs_attention` | on if a finding is at or above *Minimum severity for Repairs* | |
+| `binary_sensor.downtime_auditor_needs_attention` | on if an unacknowledged finding is at or above *Minimum severity for Repairs* | |
 | `binary_sensor.downtime_auditor_last_shutdown_unclean` | on after a crash or power loss | |
 
 There is one finding per automation (or script) and type: an automation with several missed triggers is one finding, with the triggers listed under it on the dashboard, in its Repairs issue and in the JSON report (`triggers`). Each item in `findings` includes `name`, `entity_id`, `summary`, `severity`, `confidence`, `conditions`, `platform`, the trigger id or index (or `triggers`: how many, when there are several), and, where relevant, `count` and `first_due`. All findings are listed (including severity None), most severe first, up to 50 per sensor. The attribute is excluded from the recorder so it doesn't bloat your database.
@@ -276,12 +276,17 @@ Every downtime gets its own entry, including restarts in quick succession, so yo
 
 A clean restart where nothing worth keeping was found only adds a summary line, so a busy day of config reloads won't push older, more useful reports out. In the History tab, entries without a saved report show **nothing found**, and entries past the retention period show **expired**. Entries recorded by v0.4 are shown in the new terms and marked **v0.4**; their severity column shows "—". Old files are never rewritten.
 
+### Acknowledging a finding
+
+**Acknowledge** on a finding (or **Submit** on its Repairs issue) marks it handled for this report only: its Repairs issue clears, `needs_attention` stops counting it, and the dashboard shows it greyed out with *Acknowledged* (*Hide acknowledged* filters them out). **Undo acknowledge** brings it back. Its rating doesn't change, so the next downtime reports it again as usual. To stop a finding coming back, rate it instead (see [Rating your automations](#rating-your-automations)). The counts sensors still count acknowledged findings, and each one has `acknowledged` (when) in the sensors' `findings` attribute and the JSON report.
+
 ## Services
 
 - `downtime_auditor.analyze_window` takes `start` and `end` (and optionally `notify`). It runs a **what-if** analysis for schedule-based triggers ("what would a 2am–6am outage miss?") and returns the report as a response. It's handy for sanity-checking results without restarting.
 - `downtime_auditor.resend_last_report` shows the last report again and re-sends the push.
 - `downtime_auditor.snapshot_now` forces a snapshot and returns what's currently running. Useful for debugging.
 - `downtime_auditor.dismiss_repairs` removes every Repairs issue raised by the latest report.
+- `downtime_auditor.acknowledge` takes `entity_id` and `type` (`interrupted`, `missed`, `fired_at_startup` or `reverted`), and optionally `acknowledged: false` to undo. It [acknowledges](#acknowledging-a-finding) that finding of the latest report.
 - `downtime_auditor.create_severity_labels` creates any missing `downtime_auditor_sev:` labels and returns the names it created.
 
 ## Event
@@ -294,7 +299,7 @@ After every analysis it fires `downtime_auditor_report` with:
 | `counts` | automations (or entities, for `reverted`) per type: `interrupted`, `missed`, `fired_at_startup`, `reverted` |
 | `counts_by_severity` | `critical`, `high`, `medium`, `low`, `none` |
 | `highest_severity` | the most severe finding, or `null` if there were none |
-| `needs_attention` | number of findings at or above *Minimum severity for Repairs* |
+| `needs_attention` | number of unacknowledged findings at or above *Minimum severity for Repairs* |
 | `skipped` | automations not checked because they were off |
 
 If the report changes later (entities that reported late, or a rating changed), `downtime_auditor_report_updated` fires with `generated_at`, `added`, `pending_checks`, `unchecked`, `counts`, `highest_severity` and `needs_attention`.

@@ -45,6 +45,8 @@ def test_strings_use_the_vocabulary():
     assert states == {s.value: SEVERITY_LABELS[s] for s in Severity}
     options = STRINGS["selector"]["severity"]["options"]
     assert options == {s.value: SEVERITY_LABELS[s] for s in Severity if s != Severity.NONE}
+    # Types: the acknowledge action's finding type selector.
+    assert STRINGS["selector"]["finding_type"]["options"] == {t.value: TYPE_LABELS[t] for t in FindingType}
     # Types: one Repairs issue text per finding type.
     assert set(STRINGS["issues"]) == {t.value for t in FindingType}
     for issue in STRINGS["issues"].values():

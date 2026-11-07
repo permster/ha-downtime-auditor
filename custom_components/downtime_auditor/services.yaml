@@ -18,3 +18,25 @@ resend_last_report:
 snapshot_now:
 dismiss_repairs:
 create_severity_labels:
+acknowledge:
+  fields:
+    entity_id:
+      required: true
+      example: automation.morning_lights
+      selector:
+        entity:
+    type:
+      required: true
+      default: missed
+      selector:
+        select:
+          translation_key: finding_type
+          options:
+            - interrupted
+            - missed
+            - fired_at_startup
+            - reverted
+    acknowledged:
+      default: true
+      selector:
+        boolean:

@@ -155,6 +155,7 @@ SERVICE_ANALYZE_WINDOW = "analyze_window"
 SERVICE_RESEND_LAST = "resend_last_report"
 SERVICE_SNAPSHOT_NOW = "snapshot_now"
 SERVICE_DISMISS_REPAIRS = "dismiss_repairs"
+SERVICE_ACKNOWLEDGE = "acknowledge"
 SERVICE_CREATE_SEVERITY_LABELS = "create_severity_labels"
 
 # States that mean "we don't really know"

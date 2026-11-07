@@ -53,6 +53,7 @@ function makeEnv(storage) {
         if (t === "set_severity") return { entity_id: msg.entity_id, severity: msg.severity };
         if (t === "set_trigger_severity") return { key: `${msg.item_id}|#${msg.trigger_index}:${msg.platform}`, severity: msg.severity };
         if (t === "create_severity_labels") return { created: ["downtime_auditor_sev: none"] };
+        if (t === "acknowledge") return { acknowledged: msg.acknowledged };
         throw new Error("unexpected " + msg.type);
       },
       subscribeEvents: async () => () => {},
@@ -235,6 +236,31 @@ const tick = () => new Promise((r) => setImmediate(r));
   p._render();
   assert(p.shadowRoot.innerHTML.includes("(3 of 3)") && /class="row [^"]*dim"/.test(p.shadowRoot.innerHTML), "None shown (dimmed) when toggled");
   STATE.showNone = null;
+  p._report = fixture.report;
+
+  // ---- acknowledge: this report only; tagged, dimmed, can be hidden, undone
+  p._render();
+  html = p.shadowRoot.innerHTML;
+  assert(html.includes(">Acknowledge</button>") && html.includes("A future downtime reports it again"), "acknowledge button");
+  assert(!html.includes("Hide acknowledged"), "no hide filter until something is acknowledged");
+  await p._acknowledge({ finding_type: "missed", entity_id: "automation.morning" }, true);
+  const ack = sent.filter((m) => m.type.endsWith("/acknowledge")).pop();
+  assert.strictEqual(JSON.stringify([ack.finding_type, ack.entity_id, ack.acknowledged, ack.report]),
+    JSON.stringify(["missed", "automation.morning", true, fixture.report.generated_at]), "acknowledge sent for this report");
+  const acked = JSON.parse(JSON.stringify(fixture.report));
+  acked.findings.find((f) => f.name === "Morning").acknowledged = "2026-10-27T12:00:00+00:00";
+  p._report = acked;
+  p._render();
+  html = p.shadowRoot.innerHTML;
+  assert(html.includes('class="tag ack"') && html.includes("Undo acknowledge") && html.includes("for this report only"), "acknowledged row");
+  assert(html.includes("Hide acknowledged <span class=\"muted\">(1)</span>"), "hide filter with its count");
+  STATE.hideAcknowledged = true;
+  p._render();
+  assert(p.shadowRoot.innerHTML.includes("(2 of 3)"), "acknowledged hidden");
+  STATE.hideAcknowledged = false;
+  STATE.viewingFile = "report-20261027-120000.json";
+  assert(!p._row(morning, key).includes("data-ack="), "no acknowledge on older reports");
+  STATE.viewingFile = null;
   p._report = fixture.report;
 
   // ---- rating from the dashboard calls set_severity and reloads
