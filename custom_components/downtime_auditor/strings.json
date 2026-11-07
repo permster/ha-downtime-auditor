@@ -159,7 +159,6 @@
   "issues": {
     "interrupted": {
       "title": "Interrupted by downtime: {name}",
-      "description": "`{entity_id}` was running when Home Assistant went down and did not finish.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report. Select it to acknowledge the finding, or ignore it.",
       "fix_flow": {
         "step": {
           "confirm": {
@@ -174,7 +173,6 @@
     },
     "missed": {
       "title": "Missed during downtime: {name}",
-      "description": "`{entity_id}` had a trigger that should have fired while Home Assistant was down.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report. Select it to acknowledge the finding, or ignore it.",
       "fix_flow": {
         "step": {
           "confirm": {
@@ -189,7 +187,6 @@
     },
     "fired_at_startup": {
       "title": "Fired at startup: {name}",
-      "description": "`{entity_id}` fired in the settle window right after Home Assistant started. Check it wasn't a spurious trigger (for example `unavailable → on`).\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report. Select it to acknowledge the finding, or ignore it.",
       "fix_flow": {
         "step": {
           "confirm": {
@@ -204,7 +201,6 @@
     },
     "reverted": {
       "title": "Reverted after restart: {name}",
-      "description": "`{entity_id}` came back with an older value after Home Assistant stopped uncleanly: the change made since Home Assistant last saved its states was lost. Check it, and anything that depends on it.\n\n**{summary}**\n\nDowntime: {window}\nSeverity: {severity} ({severity_reason})\nConfidence: {confidence}\n\n{details}\n\nOpen the [Downtime Auditor dashboard]({panel}) for the full report. This issue clears automatically on the next restart report. Select it to acknowledge the finding, or ignore it.",
       "fix_flow": {
         "step": {
           "confirm": {

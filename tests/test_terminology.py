@@ -50,8 +50,9 @@ def test_strings_use_the_vocabulary():
     # Types: one Repairs issue text per finding type.
     assert set(STRINGS["issues"]) == {t.value for t in FindingType}
     for issue in STRINGS["issues"].values():
+        text = issue["fix_flow"]["step"]["confirm"]["description"]  # fixable issues: hassfest allows no top-level description
         for placeholder in ("{severity}", "{severity_reason}", "{confidence}"):
-            assert placeholder in issue["description"]
+            assert placeholder in text
 
 
 def test_translations_match_strings():
