@@ -7,9 +7,12 @@ future HA release the auditor degrades to less detail instead of failing.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, time, timedelta
 import logging
 from typing import Any
+
+from jinja2 import meta
 
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers.template import Template, result_as_boolean
@@ -241,8 +244,24 @@ def template_source(conf: dict) -> str | None:
     return getattr(tpl, "template", None) or str(tpl)
 
 
+def free_variables(hass: HomeAssistant, source: str, known: Iterable[str] = ()) -> set[str]:
+    """Names a template reads that aren't Home Assistant's own or `known`: automation variables, trigger data.
+
+    Rendering without them logs a warning (HA's "Template variable warning") and the result means nothing.
+    """
+    try:
+        env = Template(source, hass)._env  # semi-internal; if it changes, templates are rendered as before
+        names = meta.find_undeclared_variables(env.parse(source))
+    except Exception:  # noqa: BLE001
+        return set()
+    known = set(known)
+    return {n for n in names if n not in env.globals and n not in known}
+
+
 def render_bool(hass: HomeAssistant, source: str, variables: dict | None = None) -> bool | None:
     """Render a template to a boolean, None on error."""
+    if free_variables(hass, source, variables or {}):
+        return None
     try:
         result = Template(source, hass).async_render(variables or {}, parse_result=False)
         return result_as_boolean(result)
@@ -253,6 +272,8 @@ def render_bool(hass: HomeAssistant, source: str, variables: dict | None = None)
 
 def render_number(hass: HomeAssistant, source: str, state: State | None) -> Any:
     """Render a numeric_state value_template with `state` bound."""
+    if free_variables(hass, source, ("state",)):
+        return None
     try:
         return Template(source, hass).async_render({"state": state}, parse_result=False)
     except Exception:  # noqa: BLE001

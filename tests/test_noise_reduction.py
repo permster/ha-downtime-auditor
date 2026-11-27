@@ -24,6 +24,7 @@ from custom_components.downtime_auditor.conditions import (
     evaluate_finding,
 )
 from custom_components.downtime_auditor.const import DOMAIN, Severity
+from custom_components.downtime_auditor.snapshot import render_bool, render_number
 from custom_components.downtime_auditor.severity import effective_severity
 
 
@@ -277,3 +278,29 @@ def test_condition_entities_skips_unreplayable_templates(hass):
     with patch.object(conditions, "Template", wraps=conditions.Template) as tpl:
         assert set(condition_entities(hass, confs)) == {"light.y"}
     assert tpl.call_count == 1  # the trigger template was never rendered
+
+
+# From a real log: blueprint/automation `variables:` that only exist during a run.
+VARIABLE_TEMPLATES = [
+    "{{ not zone_only or after_zones | select('in', zones) | list | length > 0 }}",
+    "{{ filters_satisfied }}",
+    "{{ input_camera_name|select('equalto', camera)|list|length>0 }}",
+]
+
+
+def test_templates_with_automation_variables_are_not_rendered(hass, caplog):
+    """Rendered every heartbeat without their variables, they logged "Template variable warning" each time."""
+    confs = [{"condition": "template", "value_template": src} for src in VARIABLE_TEMPLATES]
+    confs.append({"condition": "template", "value_template": "{{ is_state('light.y', 'on') }}"})
+    with patch.object(conditions, "Template", wraps=conditions.Template) as tpl:
+        assert set(condition_entities(hass, confs)) == {"light.y"}
+    assert tpl.call_count == 1  # only the one without variables
+    for src in VARIABLE_TEMPLATES:
+        assert render_bool(hass, src) is None
+    assert render_number(hass, "{{ offset }}", None) is None
+    assert "Template variable warning" not in caplog.text
+    # still rendered: HA's own globals, `state` in a numeric_state template, variables that are passed in
+    hass.states.async_set("sensor.t", "21")
+    assert render_bool(hass, "{{ is_state('sensor.t', '21') }}") is True
+    assert float(render_number(hass, "{{ state.state | float + 1 }}", hass.states.get("sensor.t"))) == 22
+    assert render_bool(hass, "{{ filters_satisfied }}", {"filters_satisfied": True}) is True

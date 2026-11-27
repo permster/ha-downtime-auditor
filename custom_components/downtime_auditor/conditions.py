@@ -29,7 +29,7 @@ from homeassistant.util import dt as dt_util
 from .const import UNKNOWN_STATES
 from .effects import extract_effects
 from .schedule import WEEKDAYS, in_numeric_range
-from .snapshot import as_list
+from .snapshot import as_list, free_variables
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -328,6 +328,11 @@ def _as_timedelta(value: Any) -> timedelta | None:
         return None
 
 
+def unreplayable(hass: HomeAssistant, src: str) -> bool:
+    """Can't be checked at a past moment: reads the clock, trigger data or the automation's variables."""
+    return bool(UNREPLAYABLE.search(src) or free_variables(hass, src))
+
+
 def condition_entities(hass: HomeAssistant, confs: Iterable[dict]) -> dict[str, set[str]]:
     """entity_id → attributes the conditions read (for the baseline and history fetch)."""
     found: dict[str, set[str]] = {}
@@ -362,7 +367,7 @@ def condition_entities(hass: HomeAssistant, confs: Iterable[dict]) -> dict[str, 
             if isinstance(value, str) and INPUT_ENTITY_ID.match(value):
                 add(value)
         # the check can't replay these (no trigger data, or the time now), and rendering logs a warning
-        if kind == "template" and (src := _src(o.get("value_template"))) and not UNREPLAYABLE.search(src):
+        if kind == "template" and (src := _src(o.get("value_template"))) and not unreplayable(hass, src):
             try:
                 info = Template(src, hass).async_render_to_info()
                 for eid in info.entities:
@@ -735,8 +740,8 @@ class ConditionEvaluator:
         src = _src(o.get("value_template"))
         if not src:
             return self._step("template", UNKNOWN, "empty template")
-        if UNREPLAYABLE.search(src):
-            return self._step("template", UNKNOWN, "uses the clock or trigger data")
+        if unreplayable(self.hass, src):
+            return self._step("template", UNKNOWN, "uses the clock, trigger data or the automation's variables")
         info = Template(src, self.hass).async_render_to_info()
         if (
             info.exception
